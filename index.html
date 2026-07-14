@@ -1,0 +1,1279 @@
+<!DOCTYPE html>
+<html lang="ca">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>4 Merge Cloud</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#e07820">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="4 Merge Cloud">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; background: #0e1117; color: #c8cad4;
+      overscroll-behavior: none;
+      /* iPad: evita que un clic sobre el visor activi la selecció de text nadiva (tot blau) */
+      -webkit-user-select: none; user-select: none;
+      -webkit-touch-callout: none;   /* evita el "callout" del Pencil llarg */
+      -webkit-tap-highlight-color: transparent;
+    }
+    canvas { display: block; touch-action: none; position: absolute; top: 0; left: 0; -webkit-user-select: none; user-select: none; }
+    /* Els inputs, textareas i el textarea del diagnòstic sí han de permetre selecció */
+    input, textarea, .allow-select { -webkit-user-select: text; user-select: text; }
+
+    /* ══════════════════════════════════════════
+       LEFT PANEL
+    ══════════════════════════════════════════ */
+    /* #controls ara és la paleta "Núvol" (vegeu .palette-content) */
+
+    #panelHeader {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 14px; border-bottom: 1px solid #2a2d40;
+      flex-shrink: 0; background: #1a1d28;
+    }
+    #panelLogo {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 12px; font-weight: 700; color: #e07820; letter-spacing: 0.5px;
+    }
+    #langToggle {
+      display: flex; border: 1px solid #2a2d40; border-radius: 4px; overflow: hidden;
+    }
+    .lang-btn {
+      padding: 3px 8px; font-size: 10px; font-weight: 700;
+      background: transparent; color: #555; border: none; cursor: pointer; letter-spacing: 0.5px;
+    }
+    .lang-btn.active { background: #e07820; color: #fff; }
+
+    #panelScroll { flex: 1; overflow-y: auto; overflow-x: hidden; }
+    #panelScroll::-webkit-scrollbar { width: 4px; }
+    #panelScroll::-webkit-scrollbar-thumb { background: #2a2d40; border-radius: 2px; }
+
+    /* Load area */
+    #loadArea {
+      margin: 12px; border: 1.5px dashed #2a2d40; border-radius: 8px;
+      text-align: center; padding: 14px 8px; cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    #loadArea:hover, #loadArea.drag-over { border-color: #e07820; background: rgba(224,120,32,0.08); }
+    #viewer.drag-over::after { content: 'Deixa els fitxers aquí'; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(224,120,32,0.15); border: 2px dashed #e07820; font-size: 22px; color: #e07820; pointer-events: none; z-index: 100; }
+    .load-title { font-size: 12px; font-weight: 600; color: #ddd; margin-top: 6px; }
+    .load-sub { font-size: 10px; color: #555; margin-top: 3px; }
+    #fileInput { display: none; }
+
+    .section-label {
+      font-size: 9px; font-weight: 700; color: #445;
+      letter-spacing: 1.2px; text-transform: uppercase;
+      padding: 6px 14px 4px;
+    }
+    #cloudSection { padding-bottom: 6px; }
+    #cloudListPanel { max-height: 100px; overflow-y: auto; padding: 0 12px; font-size: 11px; }
+    #cloudListPanel:empty::before {
+      content: 'Cap núvol actiu'; color: #445;
+      display: block; padding: 3px 2px; font-style: italic;
+    }
+    .cloud-item {
+      display: flex; align-items: center; padding: 4px 6px;
+      cursor: pointer; border-radius: 5px; border: 1px solid transparent; margin-bottom: 2px;
+    }
+    .cloud-item:hover { background: #1e2130; }
+    .cloud-item.selected { background: #2a1e0f; border-color: #e07820; }
+    .cloud-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: #ccc; }
+    .cloud-pts { font-size: 9px; color: #556; margin-right: 4px; white-space: nowrap; }
+    .cloud-eye { cursor: pointer; padding: 0 3px; font-size: 12px; color: #445; }
+    .cloud-eye:hover { color: #aaa; }
+    .cloud-del { color: #b33; cursor: pointer; padding: 0 3px; font-size: 12px; }
+    .cloud-del:hover { color: #f55; }
+
+    /* ── ACCORDION ─────────────────────────────── */
+    .acc { border-top: 1px solid #1e2130; }
+    .acc-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 9px 14px; cursor: pointer;
+      font-size: 11px; font-weight: 600; color: #889; letter-spacing: 0.4px;
+      user-select: none; transition: background 0.15s;
+    }
+    .acc-header:hover { background: #1a1d28; color: #ccddee; }
+    .acc-header.open { color: #e07820; background: #1a1d28; }
+    .acc-arrow { font-size: 9px; transition: transform 0.2s; opacity: 0.4; }
+    .acc-header.open .acc-arrow { transform: rotate(90deg); opacity: 1; }
+    .acc-icon { margin-right: 7px; }
+    .acc-body { display: none; padding: 6px 12px 10px; background: #12141b; }
+    .acc-body.open { display: block; }
+
+    /* Buttons */
+    .acc-body button {
+      display: block; width: 100%; margin: 3px 0; padding: 7px 10px;
+      font-size: 11px; font-weight: 500;
+      background: #1e2130; color: #aab;
+      border: 1px solid #252840; border-radius: 5px;
+      cursor: pointer; text-align: left;
+      transition: background 0.15s;
+    }
+    .acc-body button:hover { background: #252840; color: #fff; }
+    .acc-body button.active { background: #3a1e08; border-color: #e07820; color: #f90; }
+    .btn-row { display: flex; gap: 5px; }
+    .btn-row button { flex: 1; }
+    .btn-green { background: #1b1f29 !important; border-color: #262b38 !important; color: #c4ccda !important; }
+    .btn-green:hover { background: #e07820 !important; border-color: #e07820 !important; color: #fff !important; }
+    .trace-layer-row { display:flex; gap:4px; margin-bottom:6px; }
+    .trace-btn { flex:1; font-size:10px; padding:4px 2px; background:#1a1d28; border:1px solid #2a2d40; color:#888; border-radius:4px; cursor:pointer; }
+    .trace-btn:hover { border-color:#e07820; color:#e07820; }
+    .trace-btn.trace-active { background:#1e2a10; border-color:#4a8a20; color:#8f8; }
+    #traceToggle.tracing { background:#2a1010; border-color:#8a2020; color:#f66; }
+    #viewer.trace-mode { cursor:crosshair !important; }
+    .btn-blue { background: #1b1f29 !important; border-color: #262b38 !important; color: #c4ccda !important; }
+    .btn-blue:hover { background: #e07820 !important; border-color: #e07820 !important; color: #fff !important; }
+    .btn-red { background: #241419 !important; border-color: #3a2027 !important; color: #d59aa6 !important; }
+    .btn-red:hover { background: #7a1a1a !important; border-color: #7a1a1a !important; color: #fff !important; }
+    .btn-orange { background: #e07820 !important; border-color: #f08830 !important; color: #fff !important; font-weight: 600 !important; }
+    .btn-orange:hover { background: #f08830 !important; }
+
+    /* Numeric transform */
+    #numericTransform {
+      display: none; font-size: 11px;
+      background: #0e1117; border: 1px solid #252840;
+      border-radius: 5px; padding: 8px; margin: 5px 0;
+    }
+    .num-grid {
+      display: grid; grid-template-columns: 52px 1fr; gap: 3px 6px;
+      align-items: center; margin-bottom: 4px;
+    }
+    .num-label { font-size: 10px; color: #667; }
+    .num-input {
+      width: 100%; font-size: 11px; background: #1a1d28; color: #eee;
+      border: 1px solid #252840; border-radius: 3px; padding: 3px 5px;
+    }
+    #applyTransform { background: #e07820 !important; color: #fff !important; border-color: #f08830 !important; font-weight: 600 !important; margin-top: 4px; }
+
+    /* Noise filter */
+    #noiseFilterPanel { font-size: 11px; background: transparent; padding: 0; margin: 0; }
+    .slider-row {
+      display: flex; align-items: center; gap: 6px; margin-bottom: 5px;
+      font-size: 10px; color: #889;
+    }
+    .slider-row input[type=range] { flex: 1; }
+    .slider-row input[type=number] {
+      width: 52px; font-size: 11px; background: #1a1d28; color: #eee;
+      border: 1px solid #252840; border-radius: 3px; padding: 2px 4px;
+    }
+
+    /* DXF list */
+    #dxfInput { display: none; }
+    #dxfListPanel { max-height: 80px; overflow-y: auto; margin: 4px 0; font-size: 11px; }
+    #dxfListPanel:empty::before { content: 'Cap DXF carregat'; color: #445; display: block; padding: 3px 2px; font-style: italic; }
+    .dxf-item { display: flex; align-items: center; padding: 2px 0; border-radius: 3px; }
+    .dxf-color { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; margin-right: 6px; }
+    .dxf-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #aab; }
+    .dxf-eye { cursor: pointer; padding: 0 4px; font-size: 12px; color: #556; }
+    .dxf-del { color: #b33; cursor: pointer; padding: 0 4px; font-size: 12px; }
+    .dxf-del:hover { color: #f55; }
+
+    /* Annotate panel */
+    #annotatePanel {
+      display: none; background: #0e1117; border: 1px solid #252840;
+      border-radius: 5px; padding: 8px; margin: 4px 0; font-size: 11px;
+    }
+    .color-row { display: flex; gap: 4px; margin-bottom: 5px; }
+    .ann-color { width: 24px; height: 24px; border-radius: 4px; border: 2px solid transparent; cursor: pointer; }
+    .ann-color.selected { border-color: #fff; }
+    .mode-row { display: flex; gap: 3px; margin-bottom: 5px; }
+    .mode-row button { flex: 1; font-size: 10px; padding: 4px 2px; }
+
+    /* Auto-align panel */
+    #autoAlignPanel {
+      display: none; font-size: 11px; background: #0e1117;
+      border: 1px solid #252840; border-radius: 5px;
+      padding: 8px; margin: 4px 0; color: #aab; line-height: 1.6;
+    }
+    #autoAlignPanel button { font-size: 11px; padding: 4px 8px; margin: 2px 2px 0 0; width: auto !important; display: inline-block !important; }
+
+    /* Panel bottom */
+    #panelBottom {
+      flex-shrink: 0; padding: 10px 12px;
+      border-top: 1px solid #1e2130; background: #12141b;
+    }
+    #bottomRow { display: flex; gap: 5px; margin-bottom: 8px; }
+    #bottomRow button {
+      flex: 1; padding: 6px 4px; font-size: 10px; font-weight: 600;
+      background: #1a1d28; color: #778; border: 1px solid #252840;
+      border-radius: 5px; cursor: pointer;
+    }
+    #bottomRow button:hover { background: #1e2130; color: #bbc; }
+    #bottomRow button:disabled { opacity: 0.3; cursor: default; }
+    #merge {
+      display: block; width: 100%; padding: 10px; margin-bottom: 6px;
+      font-size: 12px; font-weight: 700; background: #e07820; color: #fff;
+      border: none; border-radius: 6px; cursor: pointer; letter-spacing: 0.5px;
+    }
+    #merge:hover { background: #f08830; }
+    #btnReset {
+      display: block; width: 100%; padding: 7px; font-size: 10px; font-weight: 700;
+      background: transparent; color: #c33; border: 1px solid #3a0e0e;
+      border-radius: 5px; cursor: pointer; letter-spacing: 0.5px;
+    }
+    #btnReset:hover { background: #1a0808; }
+
+    /* ══════════════════════════════════════════
+       VIEWER
+    ══════════════════════════════════════════ */
+    #viewer {
+      position: absolute; top: 40px; left: 0; right: 0; bottom: 0;
+    }
+
+    /* ── Barra superior d'accions globals ── */
+    #topBar {
+      position: absolute; top: 0; left: 0; right: 0; height: 40px; z-index: 40;
+      display: flex; align-items: center; gap: 8px; padding: 0 12px;
+      background: #14161d; border-bottom: 1px solid #2a2d40;
+    }
+    #tbLogo { display: flex; align-items: center; gap: 9px; margin-right: 6px; }
+    #tbIcon { flex-shrink: 0; }
+    #tbTitle { font-size: 17px; font-weight: 700; color: #e07820; letter-spacing: .3px; white-space: nowrap; }
+    #tbLogo #appVersion { font-size: 9px; color: #556; font-weight: 400; letter-spacing: 0; }
+    #topBar .tb-btn {
+      padding: 7px 15px; font-size: 13px; font-weight: 600; border-radius: 7px; cursor: pointer;
+      border: 1px solid #2a3145; background: #1a1f2c; color: #d6deea; letter-spacing: .2px;
+      transition: background .13s, color .13s, border-color .13s;
+    }
+    #topBar .tb-btn:hover { background: #e07820; color: #fff; border-color: #e07820; }
+    #topBar .tb-spacer { flex: 1; }
+
+    /* Panell de diagnòstic */
+    #diagPanel {
+      position: absolute; top: 44px; right: 8px; width: 480px; max-width: 90vw; height: 60vh;
+      z-index: 45; display: none; flex-direction: column;
+      background: rgba(14,16,22,.98); border: 1px solid #2a3145; border-radius: 8px;
+      box-shadow: 0 8px 30px rgba(0,0,0,.6);
+    }
+    #diagPanel.open { display: flex; }
+    #diagHead {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 12px; border-bottom: 1px solid #2a3145; font-size: 12px; color: #cde; font-weight: 600;
+    }
+    #diagHead button {
+      background: #1a1f2c; color: #cde; border: 1px solid #2a3145; border-radius: 5px;
+      padding: 4px 9px; font-size: 11px; cursor: pointer; margin-left: 5px;
+    }
+    #diagHead button:hover { background: #232a3a; color: #fff; }
+    #diagBody {
+      flex: 1; overflow: auto; margin: 0; padding: 10px 12px;
+      font-family: 'Cascadia Code','Consolas',monospace; font-size: 11px; line-height: 1.5;
+      color: #9fb0c0; white-space: pre-wrap; word-break: break-word;
+    }
+
+    /* ══════════════════════════════════════════
+       CAIXA LATERAL D'EINES (fixa, plegable, amb dos mòduls)
+    ══════════════════════════════════════════ */
+    #sidebox {
+      position: absolute; top: 40px; left: 0; bottom: 0; width: 300px; z-index: 36;
+      display: flex; flex-direction: column; overflow: hidden;
+      background: #14161d; border-right: 1px solid #262b38;
+      box-shadow: 4px 0 20px rgba(0,0,0,.35);
+      transition: transform .22s ease;
+    }
+    #sidebox.collapsed { transform: translateX(-101%); }
+
+    /* Pestanyes de mòdul (a dalt) */
+    #sideTabs { display: flex; align-items: stretch; height: 46px; flex-shrink: 0; background: #101219; border-bottom: 1px solid #262b38; }
+    .side-tab {
+      flex: 1; border: none; background: transparent; cursor: pointer;
+      color: #8a93a6; font-size: 12px; font-weight: 700; letter-spacing: .8px;
+      display: flex; align-items: center; justify-content: center; gap: 7px;
+      border-bottom: 2px solid transparent; transition: color .15s, background .15s;
+    }
+    .side-tab svg { width: 15px; height: 15px; opacity: .8; }
+    .side-tab:hover { color: #cdd6e6; background: #171a24; }
+    .side-tab.active { color: #e07820; border-bottom-color: #e07820; background: #171a24; }
+    .side-tab.active svg { opacity: 1; }
+    #sideCollapse { width: 40px; flex-shrink: 0; border: none; border-left: 1px solid #262b38; background: transparent; color: #8a93a6; cursor: pointer; font-size: 13px; }
+    #sideCollapse:hover { background: #171a24; color: #e07820; }
+
+    /* Botó per tornar a mostrar la caixa quan està plegada */
+    #sideReopen {
+      position: absolute; top: 48px; left: 0; z-index: 35; display: none;
+      width: 24px; height: 46px; border: 1px solid #262b38; border-left: none;
+      border-radius: 0 8px 8px 0; background: #14161d; color: #e07820; cursor: pointer;
+      font-size: 12px; box-shadow: 3px 0 12px rgba(0,0,0,.35);
+    }
+    #sideReopen.show { display: block; }
+    #sideReopen:hover { background: #1c1f2a; }
+
+    /* Un mòdul (NÚVOL o DIBUIX) — comparteixen l'espai, només un visible */
+    .side-module { display: none; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+    .side-module.open { display: flex; }
+    .mod-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 10px 12px; }
+    .mod-scroll::-webkit-scrollbar { width: 6px; }
+    .mod-scroll::-webkit-scrollbar-thumb { background: #2a3040; border-radius: 3px; }
+    .mod-sub { font-size: 9px; font-weight: 700; color: #566; letter-spacing: 1.2px; text-transform: uppercase; padding: 12px 4px 6px; }
+
+    /* Fila d'eina neta (icona + text) — estil unificat dels dos mòduls */
+    .tool-row {
+      display: flex; align-items: center; gap: 10px; width: 100%;
+      margin: 4px 0; padding: 10px 12px; text-align: left;
+      background: #1b1f29; color: #c4ccda; border: 1px solid #262b38; border-radius: 9px;
+      cursor: pointer; font-size: 12px; font-weight: 500; transition: background .13s, border-color .13s, color .13s;
+    }
+    .tool-row:hover { background: #222735; border-color: #333b4d; color: #eef2f8; }
+    .tool-row .ti { width: 17px; height: 17px; flex-shrink: 0; opacity: .85; display: inline-flex; align-items: center; justify-content: center; }
+    .tool-row.active { background: #3a2410; border-color: #e07820; color: #ffb066; }
+    .tool-row.active .ti { opacity: 1; }
+    .tool-grid { display: flex; gap: 6px; }
+    .tool-grid .tool-row { margin: 4px 0; justify-content: center; padding: 9px 6px; }
+
+    .popup-close {
+      position: absolute; top: 6px; right: 8px;
+      width: 22px; height: 22px; padding: 0;
+      background: rgba(0,0,0,.35); color: #99a;
+      border: 1px solid #2a3145; border-radius: 5px;
+      cursor: pointer; font-size: 12px; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+      pointer-events: auto; z-index: 6;
+    }
+    .popup-close:hover { background: #8b2020; color: #fff; border-color: #8b2020; }
+    /* Compat: contenidors antics reaprofitats dins la caixa */
+    .palette-content { display: none; }
+    .palette-content.open { display: flex; }
+    .pal-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 10px 12px; }
+    .pal-scroll::-webkit-scrollbar { width: 6px; }
+    .pal-scroll::-webkit-scrollbar-thumb { background: #2a3040; border-radius: 3px; }
+
+    /* Welcome screen */
+    #welcomeScreen {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      z-index: 5; pointer-events: none;
+    }
+    #welcomeCard {
+      background: #16181f; border: 1px solid #2a2d40;
+      border-radius: 12px; padding: 32px 36px;
+      max-width: 560px; width: 90%; pointer-events: auto;
+    }
+    #welcomeBadge {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: #1a1d28; border: 1px solid #2a2d40; border-radius: 20px;
+      padding: 4px 12px; font-size: 10px; font-weight: 700;
+      color: #e07820; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 16px;
+    }
+    #welcomeCard h1 { font-size: 26px; font-weight: 700; color: #eee; margin-bottom: 8px; line-height: 1.3; }
+    #welcomeCard > p { font-size: 12px; color: #667; line-height: 1.6; margin-bottom: 20px; }
+    .welcome-steps { list-style: none; margin-bottom: 24px; }
+    .welcome-steps li { display: flex; gap: 12px; margin-bottom: 10px; font-size: 12px; color: #889; line-height: 1.5; }
+    .step-num {
+      flex-shrink: 0; width: 20px; height: 20px;
+      background: #1e2130; border: 1px solid #2a2d40; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 10px; font-weight: 700; color: #e07820; margin-top: 1px;
+    }
+    .welcome-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .welcome-action {
+      background: #1a1d28; border: 1px solid #2a2d40; border-radius: 8px;
+      padding: 14px; cursor: pointer; transition: border-color 0.2s, background 0.2s;
+    }
+    .welcome-action:hover { border-color: #e07820; background: #1e2030; }
+    .wa-icon { font-size: 16px; margin-bottom: 6px; }
+    .wa-title { font-size: 12px; font-weight: 600; color: #e07820; margin-bottom: 4px; }
+    .wa-desc { font-size: 10px; color: #556; line-height: 1.5; }
+    .wa-link { font-size: 10px; color: #e07820; margin-top: 6px; display: block; opacity: 0.8; }
+
+    /* Canvases */
+    #lassoCanvas { position: absolute; inset: 0; display: none; pointer-events: none; z-index: 10; }
+    #annotateCanvas { position: absolute; inset: 0; z-index: 12; pointer-events: none; display: block; }
+    #viewer.lasso-active { cursor: crosshair; }
+    #viewer.annotate-active { cursor: crosshair; }
+
+    /* Editor de planta (CAD) — controls dins la caixa d'eines de l'esquerra */
+    #editorTools { display: none; flex-direction: column; gap: 6px; margin-top: 6px; }
+    .ed-modes { display: flex; gap: 4px; }
+    .ed-modes button { flex: 1; }
+    .ed-mode.active { background: #3a1e08; border-color: #e07820; color: #f90; }
+    #edCount { color: #a99; font-size: 10px; text-align: center; min-height: 12px; }
+    #edOpInfo { color: #9cf; font-size: 10px; text-align: center; line-height: 1.35; min-height: 0; }
+    #edOpInfo:empty { display: none; }
+    #edExport { background: #0e2a18 !important; border-color: #1a6a30 !important; color: #6f6 !important; font-weight: 700; }
+    #edThickPanel {
+      display: none; flex-direction: column; gap: 6px;
+      padding: 8px; background: #0e1016;
+      border: 1px solid #252840; border-radius: 6px;
+    }
+    #edThickInfo { color: #b9a; font-size: 10px; line-height: 1.35; }
+    .ed-thick-row { display: flex; gap: 6px; }
+    .ed-thick-row input {
+      flex: 1; min-width: 0; padding: 6px 8px;
+      border-radius: 6px; border: 1px solid #252840;
+      background: #0a0c11; color: #cde; font-size: 12px;
+    }
+    .ed-thick-row button { width: auto !important; padding: 6px 12px !important; }
+    #edThickMeasure { background: #0e2a18 !important; border-color: #1a6a30 !important; color: #9fe1cb !important; }
+
+    /* Badges */
+    .badge {
+      position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+      padding: 6px 18px; border-radius: 6px; font-size: 12px; color: #fff;
+      z-index: 25; display: none; pointer-events: none; white-space: nowrap;
+    }
+    #loadingBadge { background: rgba(0,80,200,0.92); }
+    #measureBadge { background: rgba(180,60,0,0.92); }
+    #lassoBadge   { background: rgba(140,20,20,0.92); }
+    #alignBadge   { background: rgba(0,140,80,0.92); top: 46px; }
+    #confirmBadge {
+      position: absolute; top: 46px; left: 50%; transform: translateX(-50%);
+      background: rgba(0,160,80,0.95); color: #fff;
+      padding: 5px 18px; border-radius: 6px; font-size: 12px;
+      z-index: 26; display: none; pointer-events: none; transition: opacity 0.4s;
+    }
+    #lassoCancel {
+      position: absolute; bottom: 90px; left: 50%; transform: translateX(-50%);
+      z-index: 30; display: none; background: rgba(140,20,20,0.95); color: #fff;
+      border: 1px solid #f66; border-radius: 6px; padding: 8px 20px; font-size: 14px; cursor: pointer;
+    }
+
+    /* Stats panel */
+    #statsPanel {
+      position: absolute; top: 10px; right: 52px;
+      background: rgba(22,24,31,0.97); border: 1px solid #2a2d40;
+      border-radius: 8px; padding: 10px 14px;
+      font-size: 11px; z-index: 15; display: none; min-width: 195px;
+    }
+    .stats-head {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 9px; font-weight: 700; color: #e07820;
+      letter-spacing: 1px; text-transform: uppercase; margin-bottom: 6px;
+    }
+    .stats-dot { width: 6px; height: 6px; background: #e07820; border-radius: 50%; }
+    #statsTotalPts { font-size: 13px; color: #dde; font-weight: 600; margin-left: auto; }
+    .stat-row { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 2px; }
+    .stat-label { font-size: 10px; color: #556; }
+    .stat-value { font-size: 10px; color: #cce; font-weight: 600; font-family: monospace; }
+
+    /* View toolbar */
+    #viewToolbar {
+      position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+      display: flex; flex-direction: column; gap: 4px; z-index: 15;
+    }
+    .view-btn {
+      width: 36px; height: 36px; border: 1px solid #2a2d40;
+      background: rgba(22,24,31,0.92); color: #667; padding: 0; cursor: pointer;
+      font-size: 10px; font-weight: 700; border-radius: 5px; transition: all 0.15s;
+    }
+    .view-btn:hover { background: rgba(40,44,64,0.95); color: #dde; border-color: #3a3d58; }
+    .view-btn.ortho-active { background: rgba(0,80,180,0.85); border-color: #3a8aff; color: #fff; }
+
+    /* Measure list */
+    #measureList {
+      position: absolute; bottom: 90px; right: 52px; z-index: 20;
+      background: rgba(22,24,31,0.97); border: 1px solid #2a2d40;
+      color: #eee; padding: 8px 12px; font-size: 11px; font-family: monospace;
+      border-radius: 6px; max-width: 280px; white-space: pre; display: none;
+    }
+
+    /* ══════════════════════════════════════════
+       CAD COMMAND LINE
+    ══════════════════════════════════════════ */
+    #cmdLine {
+      position: absolute; bottom: 0; left: 300px; right: 0; z-index: 18;
+      background: rgba(12,14,20,0.98); border-top: 1px solid #1e2130;
+      display: flex; flex-direction: column; transition: left .22s ease;
+    }
+    #cmdLine.full { left: 0; }   /* quan la caixa lateral està plegada */
+    #cmdLine.expanded { height: 185px; }
+    #cmdLine.collapsed { height: 36px; }
+    #cmdLine.collapsed #cmdHistory { display: none; }
+
+    #cmdHeader {
+      display: flex; align-items: center; gap: 8px;
+      padding: 0 12px; height: 36px; cursor: pointer; flex-shrink: 0;
+      user-select: none;
+    }
+    #cmdHeader:hover { background: rgba(255,255,255,0.02); }
+    .cmd-label {
+      flex: 1; font-size: 10px; font-weight: 700; color: #556;
+      letter-spacing: 1px; text-transform: uppercase;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .cmd-label-dot { width: 5px; height: 5px; background: #e07820; border-radius: 50%; }
+    #cmdLine.expanded .cmd-label { color: #e07820; }
+    #cmdLine.expanded .cmd-label-dot { background: #e07820; box-shadow: 0 0 4px #e07820; }
+    #cmdToggleBtn {
+      font-size: 9px; color: #445; background: none; border: none;
+      cursor: pointer; transition: transform 0.2s;
+    }
+    #cmdLine.collapsed #cmdToggleBtn { transform: rotate(180deg); }
+
+    #cmdHistory {
+      flex: 1; overflow-y: auto; padding: 5px 12px;
+      font-size: 11px; font-family: 'Cascadia Code', 'Consolas', monospace; line-height: 1.7;
+    }
+    #cmdHistory::-webkit-scrollbar { width: 3px; }
+    #cmdHistory::-webkit-scrollbar-thumb { background: #2a2d40; }
+
+    .cmd-u   { color: #6699cc; }
+    .cmd-a   { color: #77cc99; }
+    .cmd-x   { color: #cc9944; font-style: italic; }
+    .cmd-e   { color: #cc5544; }
+    .cmd-sys { color: #334455; }
+    .cmd-thinking { animation: cmd-blink 0.9s infinite; color: #556; }
+    @keyframes cmd-blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+    #cmdInputRow {
+      display: flex; align-items: center; gap: 0;
+      padding: 0 12px; height: 36px; flex-shrink: 0;
+      border-top: 1px solid #1a1d28;
+    }
+    #cmdLine.collapsed #cmdInputRow { border-top: none; }
+    .cmd-prompt {
+      font-size: 12px; font-weight: 700; color: #e07820;
+      font-family: 'Cascadia Code', 'Consolas', monospace; margin-right: 8px; flex-shrink: 0;
+    }
+    #cmdText {
+      flex: 1; background: transparent; color: #cce; border: none; outline: none;
+      font-size: 12px; font-family: 'Cascadia Code', 'Consolas', monospace;
+    }
+    #cmdText::placeholder { color: #2a3040; }
+    #cmdVoiceBtn {
+      background: none; border: none; cursor: pointer; color: #334; font-size: 14px;
+      padding: 0 4px; flex-shrink: 0; transition: color 0.15s;
+    }
+    #cmdVoiceBtn:hover { color: #e07820; }
+    #cmdVoiceBtn.recording { color: #c33; animation: cmd-blink 0.6s infinite; }
+
+    /* Branding */
+    #branding {
+      position: absolute; top: 10px; right: 52px;
+      z-index: 15; pointer-events: none;
+      display: flex; align-items: center; gap: 8px;
+    }
+    #branding .popup-close { position: static; }
+    #brandingText { text-align: right; }
+    #brandingName { font-size: 13px; font-weight: 700; color: #dde; letter-spacing: 0.3px; }
+    #brandingName .dot { color: #e07820; }
+    #brandingSub { font-size: 9px; color: #334; letter-spacing: 0.5px; margin-top: 1px; }
+
+    /* split divider compat */
+    #splitDivider { display: none; }
+    .hidden { display: none !important; }
+
+    /* ══════════════════════════════════════════
+       REDISSENY — estil net unificat dels dos mòduls
+    ══════════════════════════════════════════ */
+    /* Botons genèrics dins dels mòduls (base neta) */
+    .pal-scroll button, .mod-scroll .acc-body button {
+      display: block; width: 100%; margin: 5px 0; padding: 10px 12px;
+      font-size: 13px; font-weight: 500; text-align: left;
+      background: #1b1f29; color: #c4ccda;
+      border: 1px solid #262b38; border-radius: 9px;
+      cursor: pointer; transition: background .13s, border-color .13s, color .13s;
+    }
+    .pal-scroll button:hover, .mod-scroll .acc-body button:hover { background: #e07820; border-color: #e07820; color: #fff; }
+    .pal-scroll .btn-orange { text-align: center; }
+
+    /* Modes del DIBUIX: un per fila (icona + text a l'esquerra) */
+    .ed-modes { display: flex; flex-direction: column; gap: 6px; }
+    .ed-modes.ed-row { flex-direction: row; }
+    .ed-mode {
+      display: flex !important; align-items: center; gap: 10px; width: 100%;
+      margin: 0 !important; padding: 10px 12px !important; text-align: left !important;
+      background: #1b1f29; color: #c4ccda; border: 1px solid #262b38; border-radius: 9px;
+      cursor: pointer; font-size: 13px; font-weight: 500;
+      transition: background .13s, border-color .13s, color .13s;
+    }
+    .ed-mode:hover { background: #e07820; border-color: #e07820; color: #fff; }
+    .ed-modes.ed-row .ed-mode { flex: 1; justify-content: center; gap: 5px; padding: 8px 4px !important; }
+    .ed-mode.active { background: #3a2410 !important; border-color: #e07820 !important; color: #ffb066 !important; }
+
+    /* Accordions del NÚVOL com a targetes netes */
+    .acc { border: none !important; margin: 5px 0; }
+    .acc-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 11px 12px; cursor: pointer; border-radius: 9px;
+      font-size: 13px; font-weight: 600; color: #aeb7c6; letter-spacing: .2px;
+      background: #1b1f29; border: 1px solid #262b38; user-select: none;
+      transition: background .13s, color .13s;
+    }
+    .acc-header:hover { background: #222735; color: #eef2f8; }
+    .acc-header.open { color: #e07820; background: #221a12; border-color: #4a3016; border-radius: 9px 9px 0 0; }
+    .acc-arrow { font-size: 9px; opacity: .5; transition: transform .2s; }
+    .acc-header.open .acc-arrow { transform: rotate(90deg); opacity: 1; }
+    .acc-icon { margin-right: 9px; opacity: .8; }
+    .acc-body { padding: 8px 10px 10px; background: #15181f; border: 1px solid #262b38; border-top: none; border-radius: 0 0 9px 9px; }
+    .acc-body.open { display: block; }
+
+    /* Càrrega + llista de núvols dins del nou estil */
+    #loadArea { margin: 4px 0 10px; border-radius: 10px; }
+    .section-label { padding: 8px 4px 4px; }
+    #cloudListPanel { padding: 0; }
+
+    /* Estats buits en anglès (contingut generat per CSS; el traductor del DOM no hi arriba) */
+    html:lang(en) #cloudListPanel:empty::before { content: 'No active cloud'; }
+    html:lang(en) #dxfListPanel:empty::before { content: 'No DXF loaded'; }
+
+    /* ═══════════════ SHOWCASE / PREVIEW BUILD ═══════════════
+       Blocs visibles però bloquejats — badge diagonal + overlay
+       que impedeix interacció. Es veu QUÈ hi haurà però no s'usa.
+    */
+    .dev-locked {
+      position: relative;
+      pointer-events: none;
+      user-select: none;
+      opacity: 0.55;
+      filter: grayscale(35%);
+      overflow: hidden;
+    }
+    .dev-locked > * { pointer-events: none !important; }
+    .dev-locked::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(
+        45deg,
+        rgba(224,120,32,0.06) 0px,
+        rgba(224,120,32,0.06) 10px,
+        rgba(224,120,32,0.12) 10px,
+        rgba(224,120,32,0.12) 20px
+      );
+      pointer-events: none;
+      z-index: 1;
+    }
+    .dev-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: linear-gradient(135deg, #e07820 0%, #b85a10 100%);
+      color: #fff;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      padding: 3px 8px;
+      border-radius: 4px;
+      text-transform: uppercase;
+      margin-left: 6px;
+      vertical-align: middle;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+    }
+    .dev-badge::before { content: '🚧'; font-size: 11px; }
+    html:lang(en) .dev-badge-txt::after { content: 'In development'; }
+    html:lang(ca) .dev-badge-txt::after { content: 'En desenvolupament'; }
+    /* Pestanya DIBUIX bloquejada: dim + no-click, però visible */
+    #tabDraw.dev-locked-tab {
+      opacity: 0.5;
+      cursor: not-allowed;
+      position: relative;
+    }
+    #tabDraw.dev-locked-tab::after {
+      content: '🚧';
+      position: absolute;
+      top: 4px; right: 6px;
+      font-size: 10px;
+    }
+    /* Nota superior de la versió preview */
+    #previewRibbon {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 9998;
+      background: linear-gradient(90deg, rgba(224,120,32,0.95), rgba(184,90,16,0.95));
+      color: #fff;
+      font-size: 11px;
+      font-weight: 600;
+      text-align: center;
+      padding: 4px 10px;
+      letter-spacing: 0.3px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.35);
+    }
+    #previewRibbon a { color: #fff; text-decoration: underline; }
+    body.has-preview-ribbon #topBar { margin-top: 24px; }
+  </style>
+</head>
+<body class="has-preview-ribbon">
+
+  <!-- Banner superior: aquesta és la build preview / showcase (no rep actualitzacions) -->
+  <div id="previewRibbon">
+    <span data-lang="ca">🚧 <b>Build de mostra</b> · Algunes eines es veuen però estan bloquejades mentre es desenvolupen. Contacta si vols provar la versió completa.</span>
+    <span data-lang="en" style="display:none">🚧 <b>Preview build</b> · Some tools are visible but locked while under development. Get in touch to try the full version.</span>
+  </div>
+  <script>
+    (function(){
+      var setLang = function(){
+        var l = document.documentElement.lang || 'ca';
+        document.querySelectorAll('#previewRibbon [data-lang]').forEach(function(el){
+          el.style.display = (el.getAttribute('data-lang') === l) ? '' : 'none';
+        });
+      };
+      setLang();
+      // Torna a aplicar quan es canvia d'idioma (via _translateUI o botó CAT/ENG)
+      new MutationObserver(setLang).observe(document.documentElement, { attributes: true, attributeFilter: ['lang'] });
+    })();
+  </script>
+
+  <!-- ═══════════════════════════════════════
+       BARRA SUPERIOR (accions globals)
+  ═══════════════════════════════════════ -->
+  <div id="topBar">
+    <span id="tbLogo">
+      <svg id="tbIcon" width="24" height="24" viewBox="0 0 16 16" fill="none">
+        <rect x="1" y="1" width="6" height="6" rx="1.2" fill="#e07820"/>
+        <rect x="9" y="1" width="6" height="6" rx="1.2" fill="#e07820" opacity="0.65"/>
+        <rect x="1" y="9" width="6" height="6" rx="1.2" fill="#e07820" opacity="0.65"/>
+        <rect x="9" y="9" width="6" height="6" rx="1.2" fill="#e07820" opacity="0.35"/>
+      </svg>
+      <span id="tbTitle">4 Merge Cloud</span>
+      <span id="appVersion"></span>
+    </span>
+    <button id="tbOpen" class="tb-btn" title="Obrir fitxers o una carpeta (XYZ/PLY/OBJ/GLB o un projecte .4mc)">Obrir</button>
+    <button id="tbMerge" class="tb-btn" title="Uneix tots els núvols carregats en un de sol dins l'escena (no descarrega)">Unir</button>
+    <button id="tbDownload" class="tb-btn" title="Descarrega el núvol (o núvols) actuals com a fitxer XYZ">Descarregar</button>
+    <button id="tbSave" class="tb-btn" title="Desa el projecte (núvols + dibuix) com a fitxer .4mc que pots arxivar i reobrir. La sessió també es manté sola en recarregar (F5).">Desar projecte</button>
+    <button id="tbUndo" class="tb-btn" title="Desfà l'última acció">Desfer últim</button>
+    <span class="tb-spacer"></span>
+    <div id="langToggle">
+      <button class="lang-btn" data-lang="ca">CAT</button>
+      <button class="lang-btn" data-lang="en">ENG</button>
+    </div>
+    <button id="tbDiag" class="tb-btn" title="Registre de diagnòstic">Diagnòstic</button>
+  </div>
+
+  <!-- Panell de diagnòstic (caixa negra) -->
+  <div id="diagPanel">
+    <div id="diagHead">
+      <span>&#128737; Diagnòstic — registre de la sessió</span>
+      <div>
+        <button id="diagHeal" title="Auto-recuperació d'errors coneguts en runtime (activada per defecte)">&#128295; Auto-fix: ON</button>
+        <button id="diagCopy">&#128203; Copiar</button>
+        <button id="diagClear">&#128465; Netejar</button>
+        <button id="diagClose">&#10005;</button>
+      </div>
+    </div>
+    <pre id="diagBody"></pre>
+    <div id="diagCommentBox" style="border-top:1px solid #2a3145;background:#0a0c14;padding:8px 12px">
+      <div style="font-size:10px;font-weight:700;color:#e07820;letter-spacing:.8px;text-transform:uppercase;margin-bottom:4px">&#128172; Comentari de l'usuari</div>
+      <textarea id="diagUserComment" rows="3" placeholder="Escriu aquí el problema o comportament estrany que hagis detectat..." style="width:100%;box-sizing:border-box;background:#0e1117;color:#cde;border:1px solid #2a3145;border-radius:5px;padding:6px 8px;font-family:inherit;font-size:11px;line-height:1.4;resize:vertical;min-height:52px"></textarea>
+      <div style="font-size:9px;color:#556;margin-top:3px">S'inclourà a l'inici del fitxer JSON/TXT en copiar o exportar.</div>
+    </div>
+    <details id="diagHistoryPanel" style="border-top:1px solid #2a3145;background:#0a0c14">
+      <summary id="diagHistorySummary" style="padding:8px 12px;font-size:11px;color:#cde;cursor:pointer;user-select:none">&#128203; Historial d'accions (0)</summary>
+      <div id="diagHistoryTools" style="display:flex;gap:6px;padding:6px 12px;flex-wrap:wrap;border-top:1px solid #1e2130">
+        <button id="btnHistoryCopyJSON" style="background:#1a1f2c;color:#cde;border:1px solid #2a3145;border-radius:5px;padding:4px 9px;font-size:10px;cursor:pointer">&#128203; Copiar JSON</button>
+        <button id="btnHistoryExportJSON" style="background:#1a1f2c;color:#cde;border:1px solid #2a3145;border-radius:5px;padding:4px 9px;font-size:10px;cursor:pointer">&#8659; JSON</button>
+        <button id="btnHistoryExportTXT" style="background:#1a1f2c;color:#cde;border:1px solid #2a3145;border-radius:5px;padding:4px 9px;font-size:10px;cursor:pointer">&#8659; TXT</button>
+        <button id="btnHistoryClear" style="background:#241419;color:#d59aa6;border:1px solid #3a2027;border-radius:5px;padding:4px 9px;font-size:10px;cursor:pointer">&#128465; Buidar</button>
+      </div>
+      <pre id="diagHistoryBody" style="margin:0;padding:8px 12px;max-height:35vh;overflow:auto;font-family:'Cascadia Code','Consolas',monospace;font-size:10px;line-height:1.5;color:#9fb0c0;white-space:pre-wrap;word-break:break-word"></pre>
+    </details>
+  </div>
+
+  <!-- ═══════════════════════════════════════
+       CAIXA LATERAL D'EINES — dos mòduls (NÚVOL / DIBUIX)
+  ═══════════════════════════════════════ -->
+  <div id="sidebox">
+    <div id="sideTabs">
+      <button id="tabCloud" class="side-tab active">
+        <svg viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="6" height="6" rx="1.2"/><rect x="9" y="1" width="6" height="6" rx="1.2" opacity=".6"/><rect x="1" y="9" width="6" height="6" rx="1.2" opacity=".6"/><rect x="9" y="9" width="6" height="6" rx="1.2" opacity=".35"/></svg>
+        NÚVOL
+      </button>
+      <button id="tabDraw" class="side-tab dev-locked-tab" title="En desenvolupament — disponible aviat">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 13.5l1-3 7-7 2 2-7 7-3 1z"/></svg>
+        DIBUIX
+      </button>
+      <button id="sideCollapse" title="Amagar el panell">&#9664;</button>
+    </div>
+
+    <!-- MÒDUL 1: NÚVOL (eines del núvol de punts) -->
+    <div id="controls" class="side-module open">
+      <div id="panelScroll" class="mod-scroll">
+      <!-- Load -->
+      <div id="loadArea">
+        <label for="fileInput" style="cursor:pointer;display:block">
+          <svg width="28" height="28" viewBox="0 0 28 28" fill="none" stroke="#e07820" stroke-width="1.5" style="display:block;margin:0 auto">
+            <path d="M14 4v14M8 10l6-6 6 6"/>
+            <rect x="3" y="18" width="22" height="6" rx="2" stroke-opacity="0.4"/>
+          </svg>
+          <div class="load-title">Carregar Fitxer (XYZ/PLY/OBJ/GLB)</div>
+          <div class="load-sub">ARROSSEGA FITXERS O UNA CARPETA AQUÍ</div>
+        </label>
+        <input type="file" id="fileInput" multiple accept=".xyz,.ply,.txt,.obj,.glb,.gltf,.4mc,text/plain,application/octet-stream,model/gltf-binary,model/obj">
+        <input type="file" id="dirInput" webkitdirectory directory style="display:none">
+        <div style="margin-top:8px;font-size:10px;color:#667;text-align:center;line-height:1.5">
+          OBJ amb textura? <label for="dirInput" style="color:#e07820;cursor:pointer;text-decoration:underline">Carrega la carpeta sencera</label>
+          <br>(obj + mtl + textures) per veure'n el color
+        </div>
+      </div>
+
+      <!-- Clouds -->
+      <div id="cloudSection">
+        <div class="section-label">Núvols carregats</div>
+        <div id="cloudListPanel"></div>
+      </div>
+
+      <!-- (PROPIETATS eliminat a la build preview: sense funció encara.) -->
+
+      <!-- MOURE / ROTAR -->
+      <div class="acc">
+        <div class="acc-header" data-acc="accMove">
+          <span><span class="acc-icon">&#10010;</span>Moure Núvol / Rotar Núvol</span>
+          <span class="acc-arrow">&#9654;</span>
+        </div>
+        <div class="acc-body" id="accMove-body">
+          <div class="btn-row">
+            <button id="modeTranslate">&#8596; Moure Núvol</button>
+            <button id="modeRotate">&#8635; Rotar Núvol</button>
+          </div>
+          <button id="toggleNumeric" style="margin-top:4px;font-size:10px;color:#667">&#9881; Transformació Numèrica</button>
+          <div id="numericTransform">
+            <div class="num-grid">
+              <span class="num-label">X Trans.</span><input id="tx" class="num-input" type="number" step="0.001" value="0">
+              <span class="num-label">Y Trans.</span><input id="ty" class="num-input" type="number" step="0.001" value="0">
+              <span class="num-label">Z Trans.</span><input id="tz" class="num-input" type="number" step="0.001" value="0">
+              <span class="num-label">Rx (°)</span><input id="rx" class="num-input" type="number" value="0">
+              <span class="num-label">Ry (°)</span><input id="ry" class="num-input" type="number" value="0">
+              <span class="num-label">Rz (°)</span><input id="rz" class="num-input" type="number" value="0">
+            </div>
+            <button id="applyTransform" class="btn-orange">&#10003; APLICAR</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- CAIXA DE TALL -->
+      <div class="acc">
+        <div class="acc-header" data-acc="accClip">
+          <span><span class="acc-icon">&#9634;</span>Caixa de Tall</span>
+          <span class="acc-arrow">&#9654;</span>
+        </div>
+        <div class="acc-body" id="accClip-body">
+          <button id="createClipBox">&#9634; Crear Caixa de Tall</button>
+          <div class="btn-row" style="margin-top:3px">
+            <button id="moveClipBox">&#8596; Moure Caixa</button>
+            <button id="rotateClipBox">&#8635; Rotar Caixa</button>
+          </div>
+          <button id="applyClipBox" class="btn-green" style="margin-top:3px">&#9984; Aplicar Tall (Definitiu)</button>
+          <button id="removeClipBox" class="btn-red" style="margin-top:3px">&#10005; Eliminar Caixa</button>
+          <button id="btnExportSection" style="margin-top:3px">&#8659; Exportar Secció DXF</button>
+        </div>
+      </div>
+
+      <!-- ALINEAR -->
+      <div class="acc">
+        <div class="acc-header" data-acc="accAlign">
+          <span><span class="acc-icon">&#10022;</span>Alinear 2 Punts / ICP</span>
+          <span class="acc-arrow">&#9654;</span>
+        </div>
+        <div class="acc-body" id="accAlign-body">
+          <div class="btn-row">
+            <button id="align2pt">&#9679;&#9679; Alinear 2 punts</button>
+            <button id="align3pt">&#9679;&#9679;&#9679; Alinear 3 punts</button>
+          </div>
+          <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#889;margin-top:6px;cursor:pointer;user-select:none;">
+            <input type="checkbox" id="alignRefineColor" style="cursor:pointer;">
+            <span>Refinar automàticament per color (ICP)</span>
+          </label>
+          <div style="font-size:10px;color:#556;margin:2px 0 4px 22px;line-height:1.3;">
+            OFF per defecte. Si l'actives, després de marcar els punts s'aplica un ICP local guiat per color que pot desviar l'alineació manual.
+          </div>
+          <button id="btnICP" style="margin-top:4px">&#9881; Ajustar ICP (finor)</button>
+          <!-- Auto-Alinear (Color) autònom retirat: ara el color és un reforç de l'alineació per punts -->
+          <button id="btnAutoAlign" style="display:none"></button>
+          <div id="autoAlignPanel" style="display:none">
+            <div id="autoAlignResult">...</div>
+            <button id="btnApplyAutoAlign" style="display:none">&#10003; Aplicar</button>
+            <button id="btnCancelAutoAlign">&#10005; Cancel·lar</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- SELECCIÓ (LLAÇ) — bloquejat a la build preview (features en desenvolupament) -->
+      <div class="acc">
+        <div class="acc-header" data-acc="accPick" style="cursor:default;">
+          <span><span class="acc-icon">&#9678;</span>Selecció (llaç)<span class="dev-badge"><span class="dev-badge-txt"></span></span></span>
+          <span class="acc-arrow">&#9654;</span>
+        </div>
+        <div class="acc-body dev-locked" id="accPick-body">
+          <div style="font-size:11px;color:#889;line-height:1.5;margin-bottom:6px">Dibuixa un traç lliure sobre el visor: els punts que caiguin dins del volum de selecció quedaran ressaltats. Vermell (per defecte) o groc.</div>
+          <div class="btn-row">
+            <button id="btnLassoPick">&#9999; Traçat lliure</button>
+            <button id="btnPickClear">&#10005; Netejar</button>
+          </div>
+          <div class="btn-row" style="margin-top:4px">
+            <button id="btnPickColorRed" class="active" style="flex:1">&#9679; Vermell</button>
+            <button id="btnPickColorYellow" style="flex:1">&#9679; Groc</button>
+          </div>
+          <div id="pickInfo" style="font-size:11px;color:#9cf;line-height:1.4;margin-top:6px;min-height:14px"></div>
+          <button id="btnRepairSurface" style="margin-top:4px" disabled title="Ajusta un pla amb RANSAC a l'anell de punts sans i hi projecta els punts esbiaixats de la selecció">&#128295; Reparar Superfície</button>
+          <button id="btnPickExport" style="margin-top:4px" disabled>&#8659; Copiar per a IA (JSON)</button>
+
+          <!-- ALINEACIÓ PER PLANS (parets) — RANSAC + transformació rígida -->
+          <div style="margin-top:10px;border-top:1px solid #262b38;padding-top:10px">
+            <div style="font-size:9px;font-weight:700;color:#556;letter-spacing:1.2px;text-transform:uppercase;margin-bottom:6px">Alineació per Plans</div>
+            <div class="btn-row">
+              <button id="btnSetPlaneA" disabled>&#128204; Marcar Pla A</button>
+              <button id="btnSetPlaneB" disabled>&#128204; Marcar Pla B</button>
+            </div>
+            <div id="planesInfo" style="font-size:10px;color:#889;line-height:1.5;margin-top:6px">Selecciona un tros de paret amb el llaç i marca'l com A. Repeteix al núvol destí per B.</div>
+            <div class="btn-row" style="margin-top:6px">
+              <button id="btnAlignByPlanes" class="btn-green" disabled>&#128736; Alinear per Plans</button>
+              <button id="btnClearPlaneRefs" title="Buida A i B">&#10005;</button>
+            </div>
+          </div>
+
+          <!-- SEGMENTACIÓ IA — visible a preview per ensenyar què hi haurà (bloqueig ve del pare .dev-locked) -->
+          <div id="segIABlock" style="margin-top:10px;border-top:1px solid #262b38;padding-top:10px">
+            <div style="font-size:9px;font-weight:700;color:#556;letter-spacing:1.2px;text-transform:uppercase;margin-bottom:6px">Segmentació IA</div>
+            <div id="segNote" style="font-size:10px;color:#665;background:rgba(224,120,32,0.05);border:1px solid rgba(224,120,32,0.2);border-radius:6px;padding:6px 8px;margin-bottom:6px;line-height:1.4">
+              <b style="color:#e07820">Provisional</b>: classificador heurístic local (no és una IA 3D real). El contracte està preparat per connectar amb SAM3D/PointNet++ el dia que hi hagi endpoint.
+            </div>
+            <button id="btnSegPredict" disabled>&#128270; Identificar objecte</button>
+            <div id="segResult" style="display:none;margin-top:6px;padding:8px 10px;background:#0e1016;border:1px solid #262b38;border-radius:8px">
+              <div style="font-size:10px;color:#889;margin-bottom:4px">Predicció</div>
+              <div id="segLabel" style="font-size:15px;font-weight:700;color:#e07820;letter-spacing:.3px">—</div>
+              <div id="segConf" style="font-size:11px;color:#9cf;margin-top:2px">—</div>
+              <div class="btn-row" style="margin-top:8px">
+                <button id="btnSegConfirm" class="btn-green">&#10003; Correcte</button>
+                <button id="btnSegWrong">&#10005; Incorrecte</button>
+              </div>
+              <div id="segCorrect" style="display:none;margin-top:8px">
+                <div style="font-size:10px;color:#889;margin-bottom:4px">Etiqueta correcta:</div>
+                <select id="segLabelSelect" style="width:100%;background:#0a0c11;color:#cde;border:1px solid #262b38;border-radius:6px;padding:8px;font-size:12px">
+                  <option value="paret">paret</option>
+                  <option value="terra">terra</option>
+                  <option value="sostre">sostre</option>
+                  <option value="porta">porta</option>
+                  <option value="finestra">finestra</option>
+                  <option value="moble">moble</option>
+                  <option value="columna">columna</option>
+                  <option value="sanitari">sanitari</option>
+                  <option value="coberta">coberta</option>
+                  <option value="vegetacio">vegetació</option>
+                  <option value="altres">altres</option>
+                </select>
+                <button id="btnSegSaveCorrection" class="btn-green" style="margin-top:6px">&#10003; Guardar correcció</button>
+              </div>
+            </div>
+            <div style="margin-top:8px">
+              <div style="font-size:10px;color:#556;letter-spacing:.5px;margin-bottom:4px">Dataset local d'entrenament</div>
+              <div id="segTrainInfo" style="font-size:11px;color:#889">0 mostres</div>
+              <div class="btn-row" style="margin-top:4px">
+                <button id="btnSegExport">&#8659; Exportar JSON</button>
+                <button id="btnSegClear" class="btn-red">&#128465; Buidar</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CLEAN & MARKUP -->
+      <div class="acc">
+        <div class="acc-header" data-acc="accClean">
+          <span><span class="acc-icon">&#9999;</span>Clean &amp; Markup</span>
+          <span class="acc-arrow">&#9654;</span>
+        </div>
+        <div class="acc-body" id="accClean-body">
+          <div class="btn-row">
+            <button id="btnRectErase">&#9644; Rectangle</button>
+            <button id="btnLassoErase">&#9999; Lliure</button>
+          </div>
+          <button id="btnAnnotate" style="margin-top:4px">&#9998; Dibuix / Anotació</button>
+          <div id="annotatePanel">
+            <div class="color-row">
+              <div class="ann-color selected" data-color="#ff4444" style="background:#ff4444"></div>
+              <div class="ann-color" data-color="#ffdd00" style="background:#ffdd00"></div>
+              <div class="ann-color" data-color="#00ddff" style="background:#00ddff"></div>
+              <div class="ann-color" data-color="#00ff88" style="background:#00ff88"></div>
+              <div class="ann-color" data-color="#ffffff" style="background:#ffffff"></div>
+            </div>
+            <div class="mode-row">
+              <button id="annModeFree" class="active">&#9999; Lliure</button>
+              <button id="annModeLine">&#9135; Línia</button>
+              <button id="annModeArrow">&#8594; Fletxa</button>
+            </div>
+            <div class="slider-row">
+              <span>Gruix:</span>
+              <input type="range" id="annWidth" min="1" max="8" value="2">
+            </div>
+            <div class="btn-row" style="margin-top:4px">
+              <button id="annUndo">&#8617; Desfer traç</button>
+              <button id="annClear" class="btn-red">&#128465; Netejar</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- DXF OVERLAY -->
+      <div class="acc">
+        <div class="acc-header" data-acc="accDXF">
+          <span><span class="acc-icon">&#128208;</span>Carregar DXF Overlay</span>
+          <span class="acc-arrow">&#9654;</span>
+        </div>
+        <div class="acc-body" id="accDXF-body">
+          <label id="dxfInputLabel" for="dxfInput" style="display:block;padding:7px 10px;background:#0e2a18;border:1px solid #1a6a30;color:#6f6;border-radius:5px;cursor:pointer;font-size:11px;text-align:center;margin-bottom:4px">
+            &#128208; Importar Contorn DXF
+          </label>
+          <input type="file" id="dxfInput" multiple accept=".dxf">
+          <div id="dxfListPanel"></div>
+        </div>
+      </div>
+
+      <!-- FILTRE DE SOROLL -->
+      <div class="acc">
+        <div class="acc-header" data-acc="accNoise">
+          <span><span class="acc-icon">&#10022;</span>Filtre de Soroll (SOR)</span>
+          <span class="acc-arrow">&#9654;</span>
+        </div>
+        <div class="acc-body" id="accNoise-body">
+          <div id="noiseFilterPanel">
+            <div class="slider-row">
+              <span>Agressivitat:</span>
+              <input id="noiseSigma" type="range" min="0.5" max="5" step="0.1" value="2">
+              <span id="noiseSigmaVal">2.0</span>&#963;
+            </div>
+            <div class="slider-row">
+              <span>Veïns K:</span>
+              <input id="noiseK" type="number" value="10" min="3" max="30">
+            </div>
+            <button id="btnApplyNoise">Aplicar Filtre</button>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /panelScroll -->
+
+    <div id="panelBottom">
+      <div id="bottomRow">
+        <button id="btnUndo" disabled>&#8617; Desfer</button>
+        <button id="toggleMeasure">&#128207; Mesura</button>
+        <button id="clearMeasures">&#128465; Cotes</button>
+      </div>
+      <!-- Unir/Descarregar ja són a la barra superior; es mantenen ocults (els criden els botons de dalt) -->
+      <button id="mergeScene" style="display:none">Unir núvols</button>
+      <button id="merge" style="display:none">Descarregar XYZ</button>
+      <button id="btnReset">REINICIAR TOT</button>
+    </div>
+    </div><!-- /controls (mòdul NÚVOL) -->
+
+    <!-- MÒDUL 2: DIBUIX (editor CAD) -->
+    <div id="palDraw" class="side-module">
+      <div class="pal-scroll mod-scroll">
+      <button id="editorLaunchBtn" class="btn-orange" style="display:none">&#128208; Activar editor</button>
+      <div id="editorTools">
+        <div class="ed-modes">
+          <button id="edModeDraw" class="ed-mode active">&#9998; Parets</button>
+          <button id="edModePerim" class="ed-mode">&#9649; Perímetre</button>
+        </div>
+        <div class="ed-modes">
+          <button id="edModeEdit" class="ed-mode">&#10021; Editar</button>
+          <button id="edModeErase" class="ed-mode">&#10005; Esborrar</button>
+          <button id="edModeThick" class="ed-mode">&#9645; Gruix</button>
+        </div>
+        <div class="ed-modes">
+          <button id="edModeSelect" class="ed-mode">&#9638; Seleccionar (multi)</button>
+        </div>
+        <div id="edSelPanel" style="display:none;flex-direction:column;gap:6px;padding:8px;background:#0e1016;border:1px solid #252840;border-radius:6px">
+          <div id="edSelInfo" style="color:#9cf;font-size:10px;line-height:1.4">Arrossega → <b style="color:#8ab4ff">finestra</b> (tanca) · ← <b style="color:#6de0a0">captura</b> (toca) · Shift afegeix</div>
+          <div class="ed-thick-row">
+            <input id="edSelThickVal" type="number" step="0.01" min="0" placeholder="gruix (m)">
+            <button id="edSelThickApply">&#9645; Gruix</button>
+          </div>
+          <div class="ed-modes ed-row">
+            <button id="edSelSideCenter" class="ed-mode active">Centrat</button>
+            <button id="edSelSideA" class="ed-mode">Costat A</button>
+            <button id="edSelSideB" class="ed-mode">Costat B</button>
+          </div>
+          <button id="edSelDelete" class="btn-red">&#128465; Esborrar selecció</button>
+        </div>
+        <div class="ed-modes">
+          <button id="edModeEmpalme" class="ed-mode">&#8735; Empalme</button>
+          <button id="edModeExtend" class="ed-mode">&#8594;&#8614; Allargar</button>
+          <button id="edModeTrim" class="ed-mode">&#9986; Retallar</button>
+        </div>
+        <div class="ed-modes">
+          <button id="edModeOpening" class="ed-mode">&#9109; Portes / Finestres</button>
+        </div>
+        <div class="ed-modes ed-row" id="edOpTypeRow" style="display:none">
+          <button id="edOpDoor" class="ed-mode active">&#8991; Porta</button>
+          <button id="edOpWindow" class="ed-mode">&#9707; Finestra</button>
+        </div>
+        <div class="ed-modes ed-row" id="edOpWidthRow" style="display:none">
+          <button id="edW60" class="ed-mode">60</button>
+          <button id="edW70" class="ed-mode">70</button>
+          <button id="edW80" class="ed-mode">80</button>
+          <button id="edW90" class="ed-mode">90</button>
+          <button id="edWDob" class="ed-mode">Doble</button>
+          <button id="edOpRotate" class="ed-mode" title="Girar porta">&#8635;</button>
+        </div>
+        <div id="edOpInfo"></div>
+        <div id="edThickPanel">
+          <div id="edThickInfo">Selecciona una paret</div>
+          <div class="ed-thick-row">
+            <input id="edThickVal" type="number" step="0.01" min="0" placeholder="gruix (m)">
+            <button id="edThickApply">&#10003;</button>
+          </div>
+          <div class="ed-modes ed-row">
+            <button id="edSideCenter" class="ed-mode active">Centrat</button>
+            <button id="edSideA" class="ed-mode">Costat A</button>
+            <button id="edSideB" class="ed-mode">Costat B</button>
+          </div>
+          <button id="edThickMeasure">&#128207; Mesurar del núvol</button>
+          <button id="edThickAll">&#8862; Aplicar gruix a totes</button>
+        </div>
+        <button id="edHideCloud">&#128065; Núvol: 100%</button>
+        <div style="display:flex;gap:4px">
+          <button id="edUndo" style="flex:1">&#8617; Desfer</button>
+          <button id="edClear" style="flex:1">&#128465; Netejar</button>
+        </div>
+        <div id="edCount"></div>
+        <button id="edExport">&#8659; Exportar DXF</button>
+      </div>
+    </div>
+    </div><!-- /palDraw (mòdul DIBUIX) -->
+  </div><!-- /sidebox -->
+  <button id="sideReopen" title="Mostrar el panell d'eines">&#9654;</button>
+
+
+  <!-- ═══════════════════════════════════════
+       VIEWER
+  ═══════════════════════════════════════ -->
+  <div id="viewer">
+
+    <!-- Welcome screen -->
+    <div id="welcomeScreen">
+      <div id="welcomeCard" style="position:relative">
+        <button class="popup-close" title="Tancar" onclick="document.getElementById('welcomeScreen').style.display='none'">&#10005;</button>
+        <div id="welcomeBadge">
+          <span>&#9679;</span> AS-BUILT 3D CAD SCANNER
+        </div>
+        <h1>Benvingut/da a 4 Merge Cloud</h1>
+        <p>L'editor 3D de núvols de punts de referència</p>
+        <ul class="welcome-steps">
+          <li>
+            <div class="step-num">1</div>
+            <span>Col·loca, rota i uneix múltiples models (formats <strong>.PLY</strong> i <strong>.XYZ</strong>) mitjançant alineadors digitals fets a mida o ICP de precisió.</span>
+          </li>
+          <li>
+            <div class="step-num">2</div>
+            <span>Fes talls de seccions, amida distàncies, filtra soroll estàndard o realitza esborrats de punts no desitjats de forma interactiva.</span>
+          </li>
+          <li>
+            <div class="step-num">3</div>
+            <span>Dibuixa marques i planta un CAD 2D per generar DXF de la construcció escanejada.</span>
+          </li>
+        </ul>
+        <div class="welcome-actions">
+          <div class="welcome-action" onclick="document.getElementById('fileInput').click()">
+            <div class="wa-icon">&#128193;</div>
+            <div class="wa-title">Arrossegar o Carregar Fitxer de Punts</div>
+            <div class="wa-desc">Carrega els teus propis fitxers .PLY, .XYZ o .TXT obtinguts per escàner làser o drons.</div>
+            <span class="wa-link">Explorar ordinador →</span>
+          </div>
+          <div class="welcome-action" onclick="document.querySelector('[data-acc=accDXF]').click()">
+            <div class="wa-icon">&#128208;</div>
+            <div class="wa-title">Carrega fitxer DXF Overlay</div>
+            <div class="wa-desc">Importa contorns AutoCAD i dibuixos vectorials 2D sobreposats per a comprovació As-Built.</div>
+            <span class="wa-link">Importar contorn vector →</span>
+          </div>
+        </div>
+        <div id="waDemoCloud" style="display:none"></div>
+        <p style="font-size:9px;color:#334;margin-top:18px;text-align:right">v1.3.0 (Three.js WebGL)</p>
+      </div>
+    </div>
+
+    <canvas id="lassoCanvas"></canvas>
+    <canvas id="annotateCanvas"></canvas>
+
+    <div id="loadingBadge"  class="badge">&#9203; Carregant fitxer...</div>
+    <div id="measureBadge"  class="badge">&#128207; Mode mesura — fes clic a dos punts del núvol</div>
+    <div id="lassoBadge"    class="badge">&#9999; Esborra — arrossega per seleccionar àrea</div>
+    <div id="alignBadge"    class="badge"></div>
+    <div id="confirmBadge">&#10003; Posició guardada</div>
+    <button id="lassoCancel">&#10005; Cancel·lar</button>
+    <div id="measureList"></div>
+
+    <!-- Stats panel (top right, visible when cloud loaded) -->
+    <div id="statsPanel">
+      <div class="stats-head">
+        <span class="stats-dot"></span>
+        Núvols Carregats
+        <span id="statsTotalPts"></span>
+      </div>
+      <div class="stat-row"><span class="stat-label">Dimensions màximes X:</span><span class="stat-value" id="statsDimX">—</span></div>
+      <div class="stat-row"><span class="stat-label">Dimensions màximes Y:</span><span class="stat-value" id="statsDimY">—</span></div>
+      <div class="stat-row"><span class="stat-label">Dimensions màximes Z:</span><span class="stat-value" id="statsDimZ">—</span></div>
+    </div>
+
+    <!-- Branding (top right, hidden when stats panel visible) -->
+    <div id="branding">
+      <button class="popup-close" title="Tancar" onclick="document.getElementById('branding').style.display='none'">&#10005;</button>
+      <div id="brandingText">
+        <div id="brandingName"><span class="dot">&#9679;</span> 4 MERGE CLOUD</div>
+        <div id="brandingSub">Visor i Editor 3D de Núvols de Punts</div>
+      </div>
+    </div>
+
+    <!-- View toolbar (right side) -->
+    <div id="viewToolbar">
+      <button id="viewA_3d"    class="view-btn" title="Vista 3D">3D</button>
+      <button id="viewA_top"   class="view-btn" title="Vista en Planta">PL</button>
+      <button id="viewA_front" class="view-btn" title="Vista Frontal">FR</button>
+      <button id="viewA_back"  class="view-btn" title="Vista Posterior">PO</button>
+      <button id="viewA_right" class="view-btn" title="Lateral Dreta">LD</button>
+      <button id="viewA_left"  class="view-btn" title="Lateral Esquerra">LE</button>
+    </div>
+
+    <!-- CAD Command Line (Copilot IA) — OCULT fins que hi hagi backend real (v2.32.2) -->
+    <div id="cmdLine" class="collapsed" style="display:none !important">
+      <div id="cmdHeader">
+        <span class="cmd-label">
+          <span class="cmd-label-dot"></span>
+          Copilot IA — Línia de Comandes
+        </span>
+        <button id="cmdToggleBtn">&#9650;</button>
+      </div>
+      <!-- API key row — OCULT fins que hi hagi backend real (v2.32.1). Codi conservat entre etiquetes de comentari HTML.
+      <div id="apiKeyRow" style="display:none !important; align-items:center; gap:6px; padding:4px 10px; border-bottom:1px solid #1a1d28; background:rgba(224,120,32,0.05); flex-shrink:0;">
+        <span style="font-size:10px; color:#776; flex-shrink:0; white-space:nowrap;">Clau Anthropic API:</span>
+        <input type="password" id="apiKeyInput" placeholder="sk-ant-api03-..." autocomplete="off" spellcheck="false"
+          style="flex:1; min-width:0; background:#0c0e16; border:1px solid #2a2d40; color:#aaa; font-size:11px; padding:3px 7px; border-radius:3px; font-family:monospace;">
+        <button id="apiKeySave" style="font-size:10px; padding:3px 9px; background:#1a2e1a; border:1px solid #2a6a2a; color:#8c8; border-radius:3px; cursor:pointer; white-space:nowrap;">Guardar</button>
+        <button id="apiKeySkip" title="Tancar" style="font-size:11px; background:none; border:none; color:#445; cursor:pointer; padding:0 3px;">✕</button>
+      </div>
+      -->
+      <!-- Salvaguarda extra: si algun codi crea/mostra apiKeyRow o el Copilot IA programàticament, aquest CSS el força invisible -->
+      <style>
+        #apiKeyRow { display: none !important; }
+        /* Copilot IA (línia de comandes CAD) — ocult fins que hi hagi backend real */
+        #cmdLine { display: none !important; }
+        /* Segmentació IA (client heurístic + panell de dataset) */
+        #segIABlock { display: none !important; }
+      </style>
+      <div id="cmdHistory"></div>
+      <div id="cmdInputRow">
+        <span class="cmd-prompt">4MC&gt;</span>
+        <input type="text" id="cmdText" autocomplete="off" spellcheck="false"
+               placeholder="Escriu una ordre o pregunta (ex: vista de planta, aplica filtre soroll)…">
+        <button id="cmdVoiceBtn" title="Entrada per veu">&#127908;</button>
+      </div>
+    </div>
+
+    <div id="splitDivider"></div>
+  </div><!-- /viewer -->
+
+  <script>
+    // Language detection from URL param
+    const _lp = new URLSearchParams(location.search).get('lang');
+    window.APP_LANG = (_lp === 'en') ? 'en' : 'ca';
+    document.querySelectorAll('.lang-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.lang === window.APP_LANG);
+      b.addEventListener('click', () => {
+        const u = new URL(location.href);
+        u.searchParams.set('lang', b.dataset.lang);
+        location.href = u.toString();
+      });
+    });
+  </script>
+  <script type="module" src="main.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js').catch(() => {});
+      });
+    }
+  </script>
+</body>
+</html>
