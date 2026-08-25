@@ -610,64 +610,8 @@
     html:lang(en) #dxfListPanel:empty::before { content: 'No DXF loaded'; }
 
     /* ═══════════════ SHOWCASE / PREVIEW BUILD ═══════════════
-       Blocs visibles però bloquejats — badge diagonal + overlay
-       que impedeix interacció. Es veu QUÈ hi haurà però no s'usa.
+       Nota superior de la versió preview.
     */
-    .dev-locked {
-      position: relative;
-      pointer-events: none;
-      user-select: none;
-      opacity: 0.55;
-      filter: grayscale(35%);
-      overflow: hidden;
-    }
-    .dev-locked > * { pointer-events: none !important; }
-    .dev-locked::after {
-      content: '';
-      position: absolute;
-      inset: 0;
-      background: repeating-linear-gradient(
-        45deg,
-        rgba(224,120,32,0.06) 0px,
-        rgba(224,120,32,0.06) 10px,
-        rgba(224,120,32,0.12) 10px,
-        rgba(224,120,32,0.12) 20px
-      );
-      pointer-events: none;
-      z-index: 1;
-    }
-    .dev-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      background: linear-gradient(135deg, #e07820 0%, #b85a10 100%);
-      color: #fff;
-      font-size: 10px;
-      font-weight: 700;
-      letter-spacing: 0.5px;
-      padding: 3px 8px;
-      border-radius: 4px;
-      text-transform: uppercase;
-      margin-left: 6px;
-      vertical-align: middle;
-      box-shadow: 0 1px 4px rgba(0,0,0,0.3);
-    }
-    .dev-badge::before { content: '🚧'; font-size: 11px; }
-    html:lang(en) .dev-badge-txt::after { content: 'In development'; }
-    html:lang(ca) .dev-badge-txt::after { content: 'En desenvolupament'; }
-    /* Pestanya DIBUIX bloquejada: dim + no-click, però visible */
-    #tabDraw.dev-locked-tab {
-      opacity: 0.5;
-      cursor: not-allowed;
-      position: relative;
-    }
-    #tabDraw.dev-locked-tab::after {
-      content: '🚧';
-      position: absolute;
-      top: 4px; right: 6px;
-      font-size: 10px;
-    }
-    /* Nota superior de la versió preview */
     #previewRibbon {
       position: fixed;
       top: 0; left: 0; right: 0;
@@ -687,10 +631,10 @@
 </head>
 <body class="has-preview-ribbon">
 
-  <!-- Banner superior: aquesta és la build preview / showcase (no rep actualitzacions) -->
+  <!-- Banner superior: aquesta és la build preview / showcase -->
   <div id="previewRibbon">
-    <span data-lang="ca">🚧 <b>Build de mostra</b> · Algunes eines es veuen però estan bloquejades mentre es desenvolupen. Contacta si vols provar la versió completa.</span>
-    <span data-lang="en" style="display:none">🚧 <b>Preview build</b> · Some tools are visible but locked while under development. Get in touch to try the full version.</span>
+    <span data-lang="ca">🚧 <b>Build de mostra</b> · Versió preview amb les darreres novetats de v2. Contacta si vols provar la versió completa.</span>
+    <span data-lang="en" style="display:none">🚧 <b>Preview build</b> · Preview version with the latest v2 features. Get in touch to try the full version.</span>
   </div>
   <script>
     (function(){
@@ -701,7 +645,6 @@
         });
       };
       setLang();
-      // Torna a aplicar quan es canvia d'idioma (via _translateUI o botó CAT/ENG)
       new MutationObserver(setLang).observe(document.documentElement, { attributes: true, attributeFilter: ['lang'] });
     })();
   </script>
@@ -771,7 +714,7 @@
         <svg viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="6" height="6" rx="1.2"/><rect x="9" y="1" width="6" height="6" rx="1.2" opacity=".6"/><rect x="1" y="9" width="6" height="6" rx="1.2" opacity=".6"/><rect x="9" y="9" width="6" height="6" rx="1.2" opacity=".35"/></svg>
         NÚVOL
       </button>
-      <button id="tabDraw" class="side-tab dev-locked-tab" title="En desenvolupament — disponible aviat">
+      <button id="tabDraw" class="side-tab">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 13.5l1-3 7-7 2 2-7 7-3 1z"/></svg>
         DIBUIX
       </button>
@@ -805,7 +748,18 @@
         <div id="cloudListPanel"></div>
       </div>
 
-      <!-- (PROPIETATS eliminat a la build preview: sense funció encara.) -->
+      <!-- PROPIETATS -->
+      <div class="acc">
+        <div class="acc-header" data-acc="accProps">
+          <span><span class="acc-icon">&#9776;</span>Propietats</span>
+          <span class="acc-arrow">&#9654;</span>
+        </div>
+        <div class="acc-body" id="accProps-body">
+          <div id="propsContent" style="font-size:11px;color:#556;line-height:1.7">
+            Cap núvol carregat. Comença carregant un fitxer PLY o XYZ.
+          </div>
+        </div>
+      </div>
 
       <!-- MOURE / ROTAR -->
       <div class="acc">
@@ -880,13 +834,13 @@
         </div>
       </div>
 
-      <!-- SELECCIÓ (LLAÇ) — bloquejat a la build preview (features en desenvolupament) -->
+      <!-- SELECCIÓ (LLAÇ) — 2D → frustum 3D → punts ressaltats + export IA -->
       <div class="acc">
-        <div class="acc-header" data-acc="accPick" style="cursor:default;">
-          <span><span class="acc-icon">&#9678;</span>Selecció (llaç)<span class="dev-badge"><span class="dev-badge-txt"></span></span></span>
+        <div class="acc-header" data-acc="accPick">
+          <span><span class="acc-icon">&#9678;</span>Selecció (llaç)</span>
           <span class="acc-arrow">&#9654;</span>
         </div>
-        <div class="acc-body dev-locked" id="accPick-body">
+        <div class="acc-body" id="accPick-body">
           <div style="font-size:11px;color:#889;line-height:1.5;margin-bottom:6px">Dibuixa un traç lliure sobre el visor: els punts que caiguin dins del volum de selecció quedaran ressaltats. Vermell (per defecte) o groc.</div>
           <div class="btn-row">
             <button id="btnLassoPick">&#9999; Traçat lliure</button>
@@ -914,8 +868,8 @@
             </div>
           </div>
 
-          <!-- SEGMENTACIÓ IA — visible a preview per ensenyar què hi haurà (bloqueig ve del pare .dev-locked) -->
-          <div id="segIABlock" style="margin-top:10px;border-top:1px solid #262b38;padding-top:10px">
+          <!-- SEGMENTACIÓ IA (client + backend provisional) — OCULT fins que hi hagi backend real (v2.32.2) -->
+          <div id="segIABlock" style="display:none !important;margin-top:10px;border-top:1px solid #262b38;padding-top:10px">
             <div style="font-size:9px;font-weight:700;color:#556;letter-spacing:1.2px;text-transform:uppercase;margin-bottom:6px">Segmentació IA</div>
             <div id="segNote" style="font-size:10px;color:#665;background:rgba(224,120,32,0.05);border:1px solid rgba(224,120,32,0.2);border-radius:6px;padding:6px 8px;margin-bottom:6px;line-height:1.4">
               <b style="color:#e07820">Provisional</b>: classificador heurístic local (no és una IA 3D real). El contracte està preparat per connectar amb SAM3D/PointNet++ el dia que hi hagi endpoint.
