@@ -5,11 +5,7 @@ import { TransformControls } from './jsm/controls/TransformControls.js';
 import { loadPLY, loadXYZ } from './loaders/pointcloud_loaders.js';
 
 // ── Versió i feature flags ────────────────────────────────────────────────────
-const APP_VERSION = '2.33.2-preview';
-// BUILD PREVIEW: no persistim ni restaurem la sessió del visitant a IndexedDB
-// (així cada obertura de la pàgina comença en blanc, sense el núvol de la sessió
-// anterior d'aquest mateix navegador).
-const PREVIEW_BUILD = true;
+const APP_VERSION = '2.33.2';
 const FEATURES = {
   segmentacioSemantica: false,  // RANSAC + classificació per tipus
   completatBuits:       false,  // omplir forats basant-se en semàntica
@@ -272,21 +268,75 @@ async function loadOBJ(file, companions) {
   return cloud;
 }
 
-async function loadGLB(file) {
-  const buf = await file.arrayBuffer();
-  const dv = new DataView(buf);
-  if (dv.getUint32(0, true) !== 0x46546C67) throw new Error('No és un fitxer GLB vàlid');
-  let offset = 12, jsonBuf = null, binBuf = null;
-  while (offset < buf.byteLength - 8) {
-    const chunkLen  = dv.getUint32(offset, true);
-    const chunkType = dv.getUint32(offset + 4, true);
-    offset += 8;
-    if      (chunkType === 0x4E4F534A) jsonBuf = buf.slice(offset, offset + chunkLen);
-    else if (chunkType === 0x004E4942) binBuf  = buf.slice(offset, offset + chunkLen);
-    offset += chunkLen;
+async function loadGLB(file, companions) {
+  const isGLTF = /\.gltf$/i.test(file.name);
+  let gltf, binBuf = null;
+  let rawGlbBytes = null;   // conservem el fitxer original per poder reconstruir la vista de malla en reobrir el projecte
+  const externalImageBlobs = new Map();   // imageIndex → Blob (per a .gltf amb textures externes)
+
+  // Resol una uri relativa buscant al mapa "companions" (case-insensitive, per nom base i per camí relatiu)
+  function resolveCompanion(uri) {
+    if (!companions || !uri) return null;
+    const clean = decodeURI(uri).toLowerCase().replace(/^\.\//, '');
+    return companions.get(clean) || companions.get(clean.split('/').pop()) || null;
   }
-  if (!jsonBuf) throw new Error('Chunk JSON no trobat al GLB');
-  const gltf = JSON.parse(new TextDecoder().decode(jsonBuf));
+
+  if (isGLTF) {
+    gltf = JSON.parse(await file.text());
+    // Buffers externs (.bin). glTF admet múltiples buffers; els concatenem en ordre i reindexem bufferViews.
+    const bufs = gltf.buffers || [];
+    const parts = [];
+    const offsets = [];
+    let total = 0;
+    for (const b of bufs) {
+      offsets.push(total);
+      let ab;
+      if (b.uri && b.uri.startsWith('data:')) {
+        ab = await (await fetch(b.uri)).arrayBuffer();
+      } else if (b.uri) {
+        const f = resolveCompanion(b.uri);
+        if (!f) throw new Error('Falta el fitxer .bin extern: ' + b.uri + ' (puja el .gltf junt amb el .bin i les textures, o selecciona la carpeta sencera)');
+        ab = await f.arrayBuffer();
+      } else {
+        throw new Error('Buffer sense uri en .gltf no suportat');
+      }
+      parts.push(new Uint8Array(ab));
+      total += ab.byteLength;
+    }
+    const merged = new Uint8Array(total);
+    parts.forEach((p, i) => merged.set(p, offsets[i]));
+    binBuf = merged.buffer;
+    // Reindexa bufferViews perquè apuntin al buffer concatenat
+    for (const bv of gltf.bufferViews || []) {
+      bv.byteOffset = (bv.byteOffset || 0) + offsets[bv.buffer || 0];
+      bv.buffer = 0;
+    }
+    // Precarrega imatges externes com a Blobs
+    const imgs = gltf.images || [];
+    for (let i = 0; i < imgs.length; i++) {
+      const img = imgs[i];
+      if (img.uri && !img.uri.startsWith('data:') && img.bufferView == null) {
+        const f = resolveCompanion(img.uri);
+        if (f) externalImageBlobs.set(i, f);
+      }
+    }
+  } else {
+    const buf = await file.arrayBuffer();
+    rawGlbBytes = new Uint8Array(buf.slice(0));
+    const dv = new DataView(buf);
+    if (dv.getUint32(0, true) !== 0x46546C67) throw new Error('No és un fitxer GLB vàlid');
+    let offset = 12, jsonBuf = null;
+    while (offset < buf.byteLength - 8) {
+      const chunkLen  = dv.getUint32(offset, true);
+      const chunkType = dv.getUint32(offset + 4, true);
+      offset += 8;
+      if      (chunkType === 0x4E4F534A) jsonBuf = buf.slice(offset, offset + chunkLen);
+      else if (chunkType === 0x004E4942) binBuf  = buf.slice(offset, offset + chunkLen);
+      offset += chunkLen;
+    }
+    if (!jsonBuf) throw new Error('Chunk JSON no trobat al GLB');
+    gltf = JSON.parse(new TextDecoder().decode(jsonBuf));
+  }
   const dvb = binBuf ? new DataView(binBuf) : null;
 
   // Llegeix un accessor respectant byteStride (entrellaçat) i normalització
@@ -322,10 +372,34 @@ async function loadGLB(file) {
     return { data: out, comp, count: acc.count };
   }
 
-  // Decodifica una imatge del GLB (bufferView incrustat o data URI) → ImageData per mostrejar
-  async function decodeImage(imageIndex) {
+  // Llegeix un accessor d'índexs (SCALAR uint8/16/32) → Uint32Array
+  function readIndices(idx) {
+    const acc = gltf.accessors[idx];
+    const bv  = gltf.bufferViews[acc.bufferView];
+    const ct  = acc.componentType;
+    const bpe = ct === 5125 ? 4 : ct === 5123 ? 2 : 1;
+    const stride = bv.byteStride || bpe;
+    const base = (bv.byteOffset || 0) + (acc.byteOffset || 0);
+    const out = new Uint32Array(acc.count);
+    for (let i = 0; i < acc.count; i++) {
+      const o = base + i * stride;
+      if      (ct === 5125) out[i] = dvb.getUint32(o, true);
+      else if (ct === 5123) out[i] = dvb.getUint16(o, true);
+      else                  out[i] = dvb.getUint8(o);
+    }
+    return out;
+  }
+
+  // Decodifica una imatge i deixa un ImageBitmap + ImageData compartits (reduint memòria)
+  // reduccio: el bitmap per a la textura es reescala a MAX_TEX_SIZE per no petar mòbil.
+  // 1024 permet obrir 3+ GLBs alhora a iPad Safari sense esgotar la memòria de GPU.
+  const MAX_TEX_SIZE = 1024;
+  const _decodedImg = new Map();   // imageIndex → { bmpMesh, imgData }
+  async function _decodeOnce(imageIndex) {
+    if (_decodedImg.has(imageIndex)) return _decodedImg.get(imageIndex);
     const img = gltf.images?.[imageIndex];
-    if (!img) return null;
+    let out = { bmpMesh: null, imgData: null };
+    if (!img) { _decodedImg.set(imageIndex, out); return out; }
     let blob;
     if (img.bufferView != null && binBuf) {
       const bv = gltf.bufferViews[img.bufferView];
@@ -333,17 +407,34 @@ async function loadGLB(file) {
       blob = new Blob([binBuf.slice(start, start + bv.byteLength)], { type: img.mimeType || 'image/png' });
     } else if (img.uri && img.uri.startsWith('data:')) {
       blob = await (await fetch(img.uri)).blob();
+    } else if (externalImageBlobs.has(imageIndex)) {
+      blob = externalImageBlobs.get(imageIndex);
     } else {
-      return null;   // textura externa (uri a fitxer): no disponible en pujar només el GLB
+      _decodedImg.set(imageIndex, out); return out;
     }
     try {
       const bmp = await createImageBitmap(blob);
-      const cv = document.createElement('canvas'); cv.width = bmp.width; cv.height = bmp.height;
-      const c2 = cv.getContext('2d', { willReadFrequently: true }); c2.drawImage(bmp, 0, 0);
-      const id = c2.getImageData(0, 0, cv.width, cv.height);
-      bmp.close?.();
-      return id;
-    } catch (_) { return null; }
+      // 1) ImageData per mostrejar el color dels punts (a resolució completa perquè el mostreig sigui fidel)
+      try {
+        const cv = document.createElement('canvas'); cv.width = bmp.width; cv.height = bmp.height;
+        const c2 = cv.getContext('2d', { willReadFrequently: true }); c2.drawImage(bmp, 0, 0);
+        out.imgData = c2.getImageData(0, 0, cv.width, cv.height);
+      } catch (_) {}
+      // 2) Bitmap reescalat per a la textura de la malla (limita memòria de GPU en mòbils)
+      const maxDim = Math.max(bmp.width, bmp.height);
+      if (maxDim > MAX_TEX_SIZE) {
+        const scale = MAX_TEX_SIZE / maxDim;
+        const w = Math.max(1, Math.round(bmp.width * scale));
+        const h = Math.max(1, Math.round(bmp.height * scale));
+        try { out.bmpMesh = await createImageBitmap(bmp, { resizeWidth: w, resizeHeight: h, resizeQuality: 'high' }); }
+        catch (_) { out.bmpMesh = bmp; }
+      } else {
+        out.bmpMesh = bmp;
+      }
+      if (out.bmpMesh !== bmp) bmp.close?.();
+    } catch (_) {}
+    _decodedImg.set(imageIndex, out);
+    return out;
   }
   // mostreig bilineal simple (nearest) amb wrap repeat i V invertida (convenció glTF)
   function sampleTex(id, u, v) {
@@ -354,57 +445,193 @@ async function loadGLB(file) {
     const o = (y * id.width + x) * 4;
     return [id.data[o] / 255, id.data[o + 1] / 255, id.data[o + 2] / 255];
   }
-  const _texCache = new Map();
   async function getTexImageData(texIndex) {
-    if (_texCache.has(texIndex)) return _texCache.get(texIndex);
     const src = gltf.textures?.[texIndex]?.source;
-    const id = (src != null) ? await decodeImage(src) : null;
-    _texCache.set(texIndex, id);
-    return id;
+    if (src == null) return null;
+    const { imgData } = await _decodeOnce(src);
+    return imgData;
   }
+  const _tex3DCache = new Map();
+  async function getThreeTexture(texIndex) {
+    if (_tex3DCache.has(texIndex)) return _tex3DCache.get(texIndex);
+    const src = gltf.textures?.[texIndex]?.source;
+    let tex = null;
+    if (src != null) {
+      const { bmpMesh } = await _decodeOnce(src);
+      if (bmpMesh) {
+        tex = new THREE.Texture(bmpMesh);
+        tex.flipY = false;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.needsUpdate = true;
+      }
+    }
+    _tex3DCache.set(texIndex, tex);
+    return tex;
+  }
+
+  const meshGroup = new THREE.Group();
+  meshGroup.name = '__mesh_view__';
+  meshGroup.visible = false;
 
   const allPos = [], allCol = [];
   let anyCol = false, sampledTex = false, sawTexture = false;
+  const DENSIFY_TARGET = 200000;   // punts densificats objectiu per primitive amb triangles
+  const MAX_PER_TRI    = 1500;
   for (const mesh of gltf.meshes || []) {
     for (const prim of mesh.primitives || []) {
       const posIdx = prim.attributes?.POSITION;
       if (posIdx == null || !dvb) continue;
       const pos = readAccessor(posIdx);
-      for (let i = 0; i < pos.count; i++) allPos.push(pos.data[i*pos.comp], pos.data[i*pos.comp+1], pos.data[i*pos.comp+2]);
       const colIdx = prim.attributes?.COLOR_0;
       const matDef = (prim.material != null) ? gltf.materials?.[prim.material] : null;
       const pbr = matDef?.pbrMetallicRoughness;
       const bct = pbr?.baseColorTexture;
       if (bct) sawTexture = true;
       const uvIdx = bct ? (prim.attributes?.['TEXCOORD_' + (bct.texCoord || 0)] ?? prim.attributes?.TEXCOORD_0) : null;
+      const baseF = pbr?.baseColorFactor || [1, 1, 1, 1];
+
+      // Font de color per vèrtex (COLOR_0) o textura
+      let vcol = null;
       if (colIdx != null) {
-        // 1) color per vèrtex (COLOR_0)
-        anyCol = true;
         const col = readAccessor(colIdx);
         let mx = 0; for (let k = 0; k < col.data.length; k++) mx = Math.max(mx, col.data[k]);
         const div = mx > 1.001 ? 255 : 1;
-        for (let i = 0; i < pos.count; i++) allCol.push(col.data[i*col.comp]/div, col.data[i*col.comp+1]/div, col.data[i*col.comp+2]/div);
-      } else if (bct && uvIdx != null) {
-        // 2) color en TEXTURA → mostreja la imatge a la UV de cada vèrtex
-        const id = await getTexImageData(bct.index);
-        const uv = readAccessor(uvIdx);
-        const f = pbr.baseColorFactor || [1, 1, 1, 1];
-        if (id) {
-          anyCol = true; sampledTex = true;
-          for (let i = 0; i < pos.count; i++) {
-            const c = sampleTex(id, uv.data[i*uv.comp], uv.data[i*uv.comp+1]);
-            allCol.push(c[0]*f[0], c[1]*f[1], c[2]*f[2]);
-          }
-        } else {
-          for (let i = 0; i < pos.count; i++) allCol.push(1, 1, 1);
+        vcol = new Float32Array(pos.count * 3);
+        for (let i = 0; i < pos.count; i++) {
+          vcol[i*3]   = col.data[i*col.comp]   / div;
+          vcol[i*3+1] = col.data[i*col.comp+1] / div;
+          vcol[i*3+2] = col.data[i*col.comp+2] / div;
         }
-      } else if (pbr?.baseColorFactor) {
-        // 3) sense textura ni COLOR_0: color base pla del material
         anyCol = true;
-        const f = pbr.baseColorFactor;
-        for (let i = 0; i < pos.count; i++) allCol.push(f[0], f[1], f[2]);
-      } else {
-        for (let i = 0; i < pos.count; i++) allCol.push(1, 1, 1);   // res → blanc (manté el compte)
+      }
+      let texId = null, uv = null;
+      if (!vcol && bct && uvIdx != null) {
+        texId = await getTexImageData(bct.index);
+        uv = readAccessor(uvIdx);
+        if (texId) { anyCol = true; sampledTex = true; }
+      }
+      const flatColor = (!vcol && !texId && pbr?.baseColorFactor) ? [baseF[0], baseF[1], baseF[2]] : null;
+      if (flatColor) anyCol = true;
+
+      function pushColor(cOut) {
+        if (cOut) { allCol.push(cOut[0], cOut[1], cOut[2]); }
+        else      { allCol.push(1, 1, 1); }
+      }
+      function colorAtVertex(i) {
+        if (vcol)     return [vcol[i*3], vcol[i*3+1], vcol[i*3+2]];
+        if (texId)    { const c = sampleTex(texId, uv.data[i*uv.comp], uv.data[i*uv.comp+1]); return [c[0]*baseF[0], c[1]*baseF[1], c[2]*baseF[2]]; }
+        if (flatColor) return flatColor;
+        return null;
+      }
+
+      // ── Vista "Malla": construeix un THREE.Mesh amb aquesta primitive
+      try {
+        const meshGeo = new THREE.BufferGeometry();
+        const posArr = new Float32Array(pos.count * 3);
+        for (let i = 0; i < pos.count; i++) {
+          posArr[i*3]   = pos.data[i*pos.comp];
+          posArr[i*3+1] = pos.data[i*pos.comp+1];
+          posArr[i*3+2] = pos.data[i*pos.comp+2];
+        }
+        meshGeo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+        if (uv && uv.count === pos.count) {
+          const uvArr = new Float32Array(pos.count * 2);
+          for (let i = 0; i < pos.count; i++) { uvArr[i*2] = uv.data[i*uv.comp]; uvArr[i*2+1] = uv.data[i*uv.comp+1]; }
+          meshGeo.setAttribute('uv', new THREE.BufferAttribute(uvArr, 2));
+        }
+        if (vcol) {
+          meshGeo.setAttribute('color', new THREE.BufferAttribute(vcol.slice(), 3));
+        }
+        if (prim.indices != null) {
+          const idx = readIndices(prim.indices);
+          meshGeo.setIndex(new THREE.BufferAttribute(idx, 1));
+        }
+        meshGeo.computeVertexNormals();
+        let meshMat;
+        if (bct) {
+          const tex3d = await getThreeTexture(bct.index);
+          meshMat = new THREE.MeshBasicMaterial({ map: tex3d, side: THREE.DoubleSide, color: 0xffffff, vertexColors: !!vcol });
+        } else if (vcol) {
+          meshMat = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
+        } else {
+          meshMat = new THREE.MeshBasicMaterial({ color: pbr?.baseColorFactor ? new THREE.Color(baseF[0], baseF[1], baseF[2]) : 0xcccccc, side: THREE.DoubleSide });
+        }
+        meshGroup.add(new THREE.Mesh(meshGeo, meshMat));
+      } catch (_) { /* si algo falla amb la malla, seguim amb els punts */ }
+
+      // 1) Emet vèrtexs originals
+      for (let i = 0; i < pos.count; i++) {
+        allPos.push(pos.data[i*pos.comp], pos.data[i*pos.comp+1], pos.data[i*pos.comp+2]);
+        pushColor(colorAtVertex(i));
+      }
+
+      // 2) Densifica triangles: mostres proporcionals a l'àrea, color interpolat
+      const hasTriMode = (prim.mode == null || prim.mode === 4);   // TRIANGLES per defecte
+      if (!hasTriMode) continue;
+      const indices = prim.indices != null ? readIndices(prim.indices) : null;
+      const triCount = indices ? Math.floor(indices.length / 3) : Math.floor(pos.count / 3);
+      if (triCount <= 0) continue;
+
+      const areas = new Float64Array(triCount);
+      let totalArea = 0;
+      for (let t = 0; t < triCount; t++) {
+        const i0 = indices ? indices[t*3]   : t*3;
+        const i1 = indices ? indices[t*3+1] : t*3+1;
+        const i2 = indices ? indices[t*3+2] : t*3+2;
+        const ax=pos.data[i0*pos.comp], ay=pos.data[i0*pos.comp+1], az=pos.data[i0*pos.comp+2];
+        const bx=pos.data[i1*pos.comp], by=pos.data[i1*pos.comp+1], bz=pos.data[i1*pos.comp+2];
+        const cx=pos.data[i2*pos.comp], cy=pos.data[i2*pos.comp+1], cz=pos.data[i2*pos.comp+2];
+        const ex=bx-ax, ey=by-ay, ez=bz-az;
+        const fx=cx-ax, fy=cy-ay, fz=cz-az;
+        const nx=ey*fz-ez*fy, ny=ez*fx-ex*fz, nz=ex*fy-ey*fx;
+        const a = 0.5 * Math.sqrt(nx*nx + ny*ny + nz*nz);
+        areas[t] = a; totalArea += a;
+      }
+      if (totalArea <= 0) continue;
+      const perArea = DENSIFY_TARGET / totalArea;
+
+      for (let t = 0; t < triCount; t++) {
+        const n = Math.min(MAX_PER_TRI, Math.round(areas[t] * perArea));
+        if (n <= 0) continue;
+        const i0 = indices ? indices[t*3]   : t*3;
+        const i1 = indices ? indices[t*3+1] : t*3+1;
+        const i2 = indices ? indices[t*3+2] : t*3+2;
+        const p0x=pos.data[i0*pos.comp], p0y=pos.data[i0*pos.comp+1], p0z=pos.data[i0*pos.comp+2];
+        const p1x=pos.data[i1*pos.comp], p1y=pos.data[i1*pos.comp+1], p1z=pos.data[i1*pos.comp+2];
+        const p2x=pos.data[i2*pos.comp], p2y=pos.data[i2*pos.comp+1], p2z=pos.data[i2*pos.comp+2];
+        let u0=0,v0=0,u1=0,v1=0,u2=0,v2=0;
+        if (texId && uv) {
+          u0=uv.data[i0*uv.comp]; v0=uv.data[i0*uv.comp+1];
+          u1=uv.data[i1*uv.comp]; v1=uv.data[i1*uv.comp+1];
+          u2=uv.data[i2*uv.comp]; v2=uv.data[i2*uv.comp+1];
+        }
+        let c0=null,c1=null,c2=null;
+        if (vcol) {
+          c0=[vcol[i0*3],vcol[i0*3+1],vcol[i0*3+2]];
+          c1=[vcol[i1*3],vcol[i1*3+1],vcol[i1*3+2]];
+          c2=[vcol[i2*3],vcol[i2*3+1],vcol[i2*3+2]];
+        }
+        for (let s = 0; s < n; s++) {
+          let r1 = Math.random(), r2 = Math.random();
+          if (r1 + r2 > 1) { r1 = 1 - r1; r2 = 1 - r2; }
+          const w0 = 1 - r1 - r2, w1 = r1, w2 = r2;
+          allPos.push(p0x*w0 + p1x*w1 + p2x*w2,
+                      p0y*w0 + p1y*w1 + p2y*w2,
+                      p0z*w0 + p1z*w1 + p2z*w2);
+          if (texId) {
+            const c = sampleTex(texId, u0*w0+u1*w1+u2*w2, v0*w0+v1*w1+v2*w2);
+            allCol.push(c[0]*baseF[0], c[1]*baseF[1], c[2]*baseF[2]);
+          } else if (vcol) {
+            allCol.push(c0[0]*w0+c1[0]*w1+c2[0]*w2,
+                        c0[1]*w0+c1[1]*w1+c2[1]*w2,
+                        c0[2]*w0+c1[2]*w1+c2[2]*w2);
+          } else if (flatColor) {
+            allCol.push(flatColor[0], flatColor[1], flatColor[2]);
+          } else {
+            allCol.push(1, 1, 1);
+          }
+        }
       }
     }
   }
@@ -418,7 +645,33 @@ async function loadGLB(file) {
   diag('GLB ' + file.name + ': ' + (allPos.length/3) + ' punts · color: ' + colSrc);
   const cloud = new THREE.Points(geo, mat);
   cloud.name = file.name;
+  if (meshGroup.children.length > 0) {
+    cloud.add(meshGroup);
+    cloud.userData.meshView = meshGroup;
+  }
+  if (rawGlbBytes) cloud.userData.glbBytes = rawGlbBytes;
   return cloud;
+}
+
+// Reconstrueix la vista de malla d'un núvol restaurat (projecte .4mc o sessió),
+// si conserva els bytes del GLB original.
+async function attachMeshFromGlb(cloud) {
+  const bytes = cloud.userData?.glbBytes;
+  if (!bytes || cloud.userData.meshView) return;
+  try {
+    const name = cloud.name || 'restored.glb';
+    const f = new File([bytes], name, { type: 'model/gltf-binary' });
+    const rebuilt = await loadGLB(f, null);
+    const mv = rebuilt.userData?.meshView;
+    if (mv) {
+      cloud.add(mv);
+      cloud.userData.meshView = mv;
+      updateClipPlanes();
+      updateCloudList();
+    }
+    rebuilt.geometry?.dispose?.();
+    rebuilt.material?.dispose?.();
+  } catch (e) { diag('⚠ malla no reconstruïda: ' + e.message); }
 }
 
 // ── Textos UI (CA / EN) ──────────────────────────────────────────────────────
@@ -484,11 +737,6 @@ const I18N = {
   // Marca / IA
   'Visor i Editor 3D de Núvols de Punts':'3D Point Cloud Viewer & Editor',
   'Copilot IA — Línia de Comandes':'AI Copilot — Command Line',
-  // Preview build
-  'Selecció (llaç)':'Selection (lasso)',
-  'Alineació per Plans':'Plane Alignment',
-  'Segmentació IA':'AI Segmentation',
-  'Identificar objecte':'Identify object',
 };
 const I18N_ATTR = {
   // placeholders
@@ -585,6 +833,12 @@ let measurements = [];
 // ═══════════════════════════════════════════════════════════════════════════
 // Exclusivitat entre eines interactives (v2.33.2)
 // ═══════════════════════════════════════════════════════════════════════════
+// Algunes eines capturen els pointerevents del #viewer: anotació, llaç de
+// selecció, alineació 2/3 pt, mode mesura. Si el usuari canvia d'una a una
+// altra sense aturar-la abans, els listeners de l'anterior segueixen
+// interceptant els clicks i el nou mode no funciona (bug reportat 22-jul).
+// Aquest helper aturà les que corresponguin. Es crida a l'entrada de cada
+// mode exclusiu; `except` evita aturar el propi.
 function _exitExclusiveTools(opts) {
   const except = opts?.except;
   try {
@@ -791,7 +1045,13 @@ function onWindowResize() {
 // ─────────────────────────────────────────────
 function adaptPointSize(cloud) {
   cloud.material.sizeAttenuation = false;
-  cloud.material.size = 3;
+  const n = cloud.geometry?.attributes?.position?.count || 0;
+  // Ajusta la mida per no provocar solapament ("confeti") en núvols molt densos
+  let size = 3;
+  if      (n > 1_500_000) size = 1;
+  else if (n >   500_000) size = 1.5;
+  else if (n >   200_000) size = 2;
+  cloud.material.size = size;
   cloud.material.needsUpdate = true;
 }
 
@@ -804,20 +1064,26 @@ function updateClipPlanes() {
   // Es creen els plans un sol cop i després es MUTEN in-place (sense recompilar);
   // només es marca needsUpdate quan canvia el NOMBRE de plans (activa/desactiva clipping).
   clouds.forEach(cloud => {
-    const mat = cloud.material;
-    if (!mat) return;
+    // Recull tots els materials afectats: el del núvol + els de la vista malla si existeix
+    const materials = [];
+    if (cloud.material) materials.push(cloud.material);
+    if (cloud.userData?.meshView) {
+      cloud.userData.meshView.traverse(o => { if (o.isMesh && o.material) materials.push(o.material); });
+    }
     const box = cloud.userData.clipBox;
-    if (!box) {
-      if (mat.clippingPlanes && mat.clippingPlanes.length) { mat.clippingPlanes = []; mat.needsUpdate = true; }
-      return;
-    }
-    box.updateMatrixWorld(true);
-    if (!mat.clippingPlanes || mat.clippingPlanes.length !== LOCAL_CLIP_PLANES.length) {
-      mat.clippingPlanes = LOCAL_CLIP_PLANES.map(() => new THREE.Plane());
-      mat.needsUpdate = true;   // només quan (re)apareix el clipping
-    }
-    for (let i = 0; i < LOCAL_CLIP_PLANES.length; i++) {
-      mat.clippingPlanes[i].copy(LOCAL_CLIP_PLANES[i]).applyMatrix4(box.matrixWorld);
+    for (const mat of materials) {
+      if (!box) {
+        if (mat.clippingPlanes && mat.clippingPlanes.length) { mat.clippingPlanes = []; mat.needsUpdate = true; }
+        continue;
+      }
+      box.updateMatrixWorld(true);
+      if (!mat.clippingPlanes || mat.clippingPlanes.length !== LOCAL_CLIP_PLANES.length) {
+        mat.clippingPlanes = LOCAL_CLIP_PLANES.map(() => new THREE.Plane());
+        mat.needsUpdate = true;
+      }
+      for (let i = 0; i < LOCAL_CLIP_PLANES.length; i++) {
+        mat.clippingPlanes[i].copy(LOCAL_CLIP_PLANES[i]).applyMatrix4(box.matrixWorld);
+      }
     }
   });
 }
@@ -833,6 +1099,11 @@ function removeClipBox() {
   cloud.userData.boxRelMatrix = null;
   cloud.material.clippingPlanes = [];
   cloud.material.needsUpdate = true;
+  if (cloud.userData?.meshView) {
+    cloud.userData.meshView.traverse(o => {
+      if (o.isMesh && o.material) { o.material.clippingPlanes = []; o.material.needsUpdate = true; }
+    });
+  }
   if (selectedCloud) transformControls.attach(selectedCloud);
   else transformControls.detach();
   // Torna al mode del núvol
@@ -1835,6 +2106,8 @@ function _annTEnd(e) {
 }
 
 function startAnnotate() {
+  // FIX v2.33.2: idempotent. Si ja està activa, no tornem a afegir listeners
+  // (evita duplicats acumulats si algú crida startAnnotate dues vegades).
   if (_annActive) return;
   _exitExclusiveTools({ except: 'annotate' });
   _annActive = true;
@@ -4062,7 +4335,7 @@ function setupUI() {
           if      (ext === 'ply')                cloud = await loadPLY(file);
           else if (ext === 'xyz' || ext === 'txt') cloud = await loadXYZ(file);
           else if (ext === 'obj')                cloud = await loadOBJ(file, companions);
-          else if (ext === 'glb' || ext === 'gltf') cloud = await loadGLB(file);
+          else if (ext === 'glb' || ext === 'gltf') cloud = await loadGLB(file, companions);
           else { alert(T.unsupported(ext)); continue; }
         } catch (err) {
           console.error('Error carregant núvol:', err);
@@ -4490,6 +4763,7 @@ function setupUI() {
 
   // ── Mode mesura ──
   document.getElementById('toggleMeasure').onclick = () => {
+    // Si activem mesura, aturem qualsevol altra eina exclusiva primer
     if (!measuring) _exitExclusiveTools({ except: 'measure' });
     else cancelAlign();
     measuring = !measuring;
@@ -4619,6 +4893,24 @@ function updateCloudList() {
     eye.title = cloud.visible ? 'Ocultar' : 'Mostrar';
     eye.onclick = (e) => { e.stopPropagation(); cloud.visible = !cloud.visible; updateCloudList(); _syncMergeBtn(); };
 
+    // Botó Malla / Núvol (només si el fitxer porta malla — GLB/GLTF)
+    let meshBtn = null;
+    if (cloud.userData?.meshView) {
+      meshBtn = document.createElement('span');
+      meshBtn.className = 'cloud-eye';
+      const meshOn = cloud.userData.meshView.visible;
+      meshBtn.textContent = meshOn ? '▦' : '⋯';
+      meshBtn.title = meshOn ? 'Veure com a núvol de punts' : 'Veure com a malla texturada';
+      meshBtn.style.marginRight = '4px';
+      meshBtn.onclick = (e) => {
+        e.stopPropagation();
+        const mv = cloud.userData.meshView;
+        mv.visible = !mv.visible;
+        cloud.material.visible = !mv.visible;   // amaga els punts quan es veu la malla
+        updateCloudList();
+      };
+    }
+
     const del = document.createElement('span');
     del.className = 'cloud-del';
     del.textContent = '✕';
@@ -4627,6 +4919,7 @@ function updateCloudList() {
 
     item.appendChild(name);
     item.appendChild(pts);
+    if (meshBtn) item.appendChild(meshBtn);
     item.appendChild(eye);
     item.appendChild(del);
     item.onclick = () => selectCloud(cloud);
@@ -5098,6 +5391,38 @@ function mergeCloudsInScene() {
   const merged = new THREE.Points(geo, mat);
   merged.name = 'Núvol unit';
 
+  // Preserva la vista de MALLA de tots els núvols units, aplicant la seva
+  // matriu de món a les geometries perquè el resultat quedi coherent amb
+  // el núvol combinat. Els materials (i les seves textures) es reutilitzen.
+  const mergedMeshGroup = new THREE.Group();
+  mergedMeshGroup.name = '__mesh_view__';
+  mergedMeshGroup.visible = false;
+  const mergedGlbList = [];
+  for (const c of list) {
+    if (c.userData?.glbBytes) mergedGlbList.push(c.userData.glbBytes);
+    const mv = c.userData?.meshView;
+    if (!mv) continue;
+    mv.updateWorldMatrix(true, true);
+    mv.traverse(o => {
+      if (o.isMesh && o.geometry) {
+        o.updateMatrixWorld(true);
+        const g = o.geometry.clone();
+        g.applyMatrix4(o.matrixWorld);
+        // Material nou per aïllar-nos del cicle de vida del núvol origen
+        const src = o.material || {};
+        const hasVCol = !!src.vertexColors && !!g.getAttribute('color');
+        const baseCol = src.color?.clone?.() || new THREE.Color(0xffffff);
+        const newMat = new THREE.MeshBasicMaterial({
+          map: src.map || null,
+          color: baseCol,
+          vertexColors: hasVCol,
+          side: THREE.DoubleSide,
+        });
+        mergedMeshGroup.add(new THREE.Mesh(g, newMat));
+      }
+    });
+  }
+
   // Desenganxa el gizmo abans de destruir els núvols antics (evita que quedi apuntant a un objecte destruït)
   if (transformControls) transformControls.detach();
 
@@ -5124,6 +5449,11 @@ function mergeCloudsInScene() {
   if (!clouds.includes(selectedCloud)) selectedCloud = null;
 
   adaptPointSize(merged);
+  if (mergedMeshGroup.children.length > 0) {
+    merged.add(mergedMeshGroup);
+    merged.userData.meshView = mergedMeshGroup;
+  }
+  if (mergedGlbList.length > 0) merged.userData.glbBytesList = mergedGlbList;
   scene.add(merged);
   clouds.push(merged);
   selectableObjects.push(merged);
@@ -5204,6 +5534,7 @@ function _serializeCloud(cloud) {
     sizeAttenuation: cloud.material?.sizeAttenuation ?? false,   // clau: sense això els punts es veien com a blobs de món
     pos: pos ? pos.array.slice(0) : null,
     col: col ? col.array.slice(0) : null,
+    glb: cloud.userData?.glbBytes || null,   // per poder reconstruir la vista de malla
   };
 }
 function _deserializeCloud(d) {
@@ -5224,6 +5555,7 @@ function _deserializeCloud(d) {
     cloud.matrix.fromArray(d.matrix);
     cloud.matrix.decompose(cloud.position, cloud.quaternion, cloud.scale);
   }
+  if (d.glb) cloud.userData.glbBytes = d.glb instanceof Uint8Array ? d.glb : new Uint8Array(d.glb);
   return cloud;
 }
 
@@ -5238,7 +5570,6 @@ function _collectSession() {
 
 // Auto-desat (debounced) — s'invoca a cada canvi rellevant
 function persistSession(immediate) {
-  if (PREVIEW_BUILD) return;   // preview: no persistim res al visitant
   if (_restoring || !_sessionReady) return;
   clearTimeout(_persistTimer);
   const run = async () => {
@@ -5254,14 +5585,6 @@ function persistSession(immediate) {
 
 // Restauració de la sessió a l'arrencada
 async function restoreSession() {
-  // BUILD PREVIEW: no restaurem res + esborrem qualsevol sessió residual
-  // que el visitant tingui d'una versió anterior (o de la versió de treball
-  // si per casualitat coincideix d'origen). Arrenquem sempre net.
-  if (PREVIEW_BUILD) {
-    try { await idbDel(MC_KEY); } catch (_) {}
-    _sessionReady = true;
-    return;
-  }
   let data;
   try { data = await idbGet(MC_KEY); } catch (_) { _sessionReady = true; return; }
   if (data && data.clouds && data.clouds.length) {
@@ -5270,6 +5593,7 @@ async function restoreSession() {
       for (const cd of data.clouds) {
         const cloud = _deserializeCloud(cd);
         scene.add(cloud); clouds.push(cloud); selectableObjects.push(cloud);
+        if (cloud.userData?.glbBytes) attachMeshFromGlb(cloud);
       }
       const last = clouds[clouds.length - 1];
       selectCloud(last);
@@ -5297,12 +5621,26 @@ function _b64ToF32(b64) {
   for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i);
   return new Float32Array(bytes.buffer);
 }
+function _u8ToB64(u8) {
+  if (!u8) return null;
+  let s = '';
+  const CH = 0x8000;
+  for (let i = 0; i < u8.length; i += CH) s += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+  return btoa(s);
+}
+function _b64ToU8(b64) {
+  if (!b64) return null;
+  const s = atob(b64);
+  const bytes = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i);
+  return bytes;
+}
 function saveProject() {
   if (clouds.length === 0 && !(_ed2d && _ed2d.count().walls)) { alert('No hi ha res per desar encara. Carrega un núvol o dibuixa una planta.'); return; }
   const s = _collectSession();
   const data = {
     format: '4mc-project', version: 1, t: s.t,
-    clouds: s.clouds.map(c => ({ name: c.name, visible: c.visible, matrix: c.matrix, size: c.size, pos: _f32ToB64(c.pos), col: c.col ? _f32ToB64(c.col) : null })),
+    clouds: s.clouds.map(c => ({ name: c.name, visible: c.visible, matrix: c.matrix, size: c.size, pos: _f32ToB64(c.pos), col: c.col ? _f32ToB64(c.col) : null, glb: c.glb ? _u8ToB64(c.glb) : null })),
     drawing: s.drawing,
   };
   const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
@@ -5318,8 +5656,9 @@ async function loadProject(file) {
   const data = JSON.parse(await file.text());
   if (!data || data.format !== '4mc-project') throw new Error('No és un projecte .4mc vàlid');
   for (const cd of (data.clouds || [])) {
-    const cloud = _deserializeCloud({ name: cd.name, visible: cd.visible, matrix: cd.matrix, size: cd.size, pos: _b64ToF32(cd.pos), col: cd.col ? _b64ToF32(cd.col) : null });
+    const cloud = _deserializeCloud({ name: cd.name, visible: cd.visible, matrix: cd.matrix, size: cd.size, pos: _b64ToF32(cd.pos), col: cd.col ? _b64ToF32(cd.col) : null, glb: cd.glb ? _b64ToU8(cd.glb) : null });
     scene.add(cloud); clouds.push(cloud); selectableObjects.push(cloud);
+    if (cloud.userData?.glbBytes) attachMeshFromGlb(cloud);
   }
   if (data.drawing) {
     try { localStorage.setItem('mc_editor_state', JSON.stringify(data.drawing)); if (_ed2d) _ed2d.setState(data.drawing); } catch (_) {}
@@ -6034,20 +6373,7 @@ function initTopUI() {
     else { if (_ed2dActive) toggleEditor2D(); }
   };
   pals.forEach(p => {
-    document.getElementById(p.tab)?.addEventListener('click', () => {
-      // BUILD PREVIEW: la pestanya DIBUIX es veu però no s'obre (mòdul en desenvolupament)
-      if (p.pal === 'palDraw') {
-        const msg = (window.APP_LANG === 'en')
-          ? '🚧 The DRAWING module is under development in this preview build. Coming soon.'
-          : '🚧 El mòdul DIBUIX està en desenvolupament en aquesta build de mostra. Disponible aviat.';
-        // toast petit no bloquejant reutilitzant loadingBadge si existeix
-        const b = document.getElementById('loadingBadge');
-        if (b) { b.style.display = 'block'; b.textContent = msg; setTimeout(() => { b.style.display = 'none'; b.textContent = ''; }, 2600); }
-        else { alert(msg); }
-        return;
-      }
-      setModule(p.pal);
-    });
+    document.getElementById(p.tab)?.addEventListener('click', () => setModule(p.pal));
   });
   setModule('controls');   // per defecte es mostra el mòdul NÚVOL
 
