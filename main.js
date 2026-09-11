@@ -653,6 +653,51 @@ async function loadGLB(file, companions) {
   return cloud;
 }
 
+// Reconstrueix la vista de MALLA d'un núvol unit a partir de la llista de GLBs originals
+// i les seves matrius de món al moment d'unir. Genera un grup amb totes les malles amb
+// les matrius aplicades, tal com fa mergeCloudsInScene.
+async function attachMergedMeshFromGlbs(cloud) {
+  const list = cloud.userData?.glbBytesList;
+  if (!list || !list.length || cloud.userData.meshView) return;
+  const meshGroup = new THREE.Group();
+  meshGroup.name = '__mesh_view__';
+  meshGroup.visible = false;
+  for (const entry of list) {
+    const bytes = entry?.bytes; const matArr = entry?.matrix;
+    if (!bytes) continue;
+    try {
+      const f = new File([bytes], cloud.name || 'restored.glb', { type: 'model/gltf-binary' });
+      const rebuilt = await loadGLB(f, null);
+      const mv = rebuilt.userData?.meshView;
+      if (mv) {
+        const wm = new THREE.Matrix4();
+        if (Array.isArray(matArr) && matArr.length === 16) wm.fromArray(matArr);
+        mv.traverse(o => {
+          if (o.isMesh && o.geometry) {
+            const g = o.geometry.clone();
+            g.applyMatrix4(wm);
+            const src = o.material || {};
+            const hasVCol = !!src.vertexColors && !!g.getAttribute('color');
+            const baseCol = src.color?.clone?.() || new THREE.Color(0xffffff);
+            const newMat = new THREE.MeshBasicMaterial({
+              map: src.map || null, color: baseCol, vertexColors: hasVCol, side: THREE.DoubleSide,
+            });
+            meshGroup.add(new THREE.Mesh(g, newMat));
+          }
+        });
+      }
+      rebuilt.geometry?.dispose?.();
+      rebuilt.material?.dispose?.();
+    } catch (e) { diag('⚠ malla unida no reconstruïda: ' + e.message); }
+  }
+  if (meshGroup.children.length > 0) {
+    cloud.add(meshGroup);
+    cloud.userData.meshView = meshGroup;
+    updateClipPlanes();
+    updateCloudList();
+  }
+}
+
 // Reconstrueix la vista de malla d'un núvol restaurat (projecte .4mc o sessió),
 // si conserva els bytes del GLB original.
 async function attachMeshFromGlb(cloud) {
@@ -4145,6 +4190,51 @@ document.addEventListener('keydown', e => {
 });
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Retalla una THREE.Mesh in-place: només conserva els triangles que tenen
+// els TRES vèrtexs dins de TOTS els plans (plans donats en coords de món).
+// Preserva l'atribut UV. Elimina l'índex (queda com a geometria no-indexada).
+function _cropMeshWithPlanes(mesh, worldPlanes) {
+  const g = mesh.geometry;
+  const posAttr = g.getAttribute('position');
+  if (!posAttr) return;
+  const uvAttr = g.getAttribute('uv');
+  const colAttr = g.getAttribute('color');
+  const idx = g.getIndex();
+  mesh.updateMatrixWorld(true);
+  const mw = mesh.matrixWorld;
+  const triCount = idx ? Math.floor(idx.count / 3) : Math.floor(posAttr.count / 3);
+  const outPos = [], outUv = uvAttr ? [] : null, outCol = colAttr ? [] : null;
+  const v = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+  const loc = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+  for (let t = 0; t < triCount; t++) {
+    const i0 = idx ? idx.getX(t*3)   : t*3;
+    const i1 = idx ? idx.getX(t*3+1) : t*3+1;
+    const i2 = idx ? idx.getX(t*3+2) : t*3+2;
+    loc[0].fromBufferAttribute(posAttr, i0); v[0].copy(loc[0]).applyMatrix4(mw);
+    loc[1].fromBufferAttribute(posAttr, i1); v[1].copy(loc[1]).applyMatrix4(mw);
+    loc[2].fromBufferAttribute(posAttr, i2); v[2].copy(loc[2]).applyMatrix4(mw);
+    let keep = true;
+    for (const p of worldPlanes) {
+      if (p.distanceToPoint(v[0]) < 0 || p.distanceToPoint(v[1]) < 0 || p.distanceToPoint(v[2]) < 0) { keep = false; break; }
+    }
+    if (!keep) continue;
+    outPos.push(loc[0].x, loc[0].y, loc[0].z, loc[1].x, loc[1].y, loc[1].z, loc[2].x, loc[2].y, loc[2].z);
+    if (outUv) { outUv.push(uvAttr.getX(i0), uvAttr.getY(i0), uvAttr.getX(i1), uvAttr.getY(i1), uvAttr.getX(i2), uvAttr.getY(i2)); }
+    if (outCol) {
+      outCol.push(colAttr.getX(i0), colAttr.getY(i0), colAttr.getZ(i0),
+                  colAttr.getX(i1), colAttr.getY(i1), colAttr.getZ(i1),
+                  colAttr.getX(i2), colAttr.getY(i2), colAttr.getZ(i2));
+    }
+  }
+  const ng = new THREE.BufferGeometry();
+  ng.setAttribute('position', new THREE.Float32BufferAttribute(outPos, 3));
+  if (outUv)  ng.setAttribute('uv',    new THREE.Float32BufferAttribute(outUv, 2));
+  if (outCol) ng.setAttribute('color', new THREE.Float32BufferAttribute(outCol, 3));
+  ng.computeBoundingBox(); ng.computeBoundingSphere();
+  try { g.dispose(); } catch (_) {}
+  mesh.geometry = ng;
+}
+
 function applyAndKeepClip() {
   const { cloud, box } = _findClipBoxOwner();
   if (!cloud || !box) { alert(T.noBoxCreated); return; }
@@ -4182,6 +4272,21 @@ function applyAndKeepClip() {
   cloud.geometry = newGeom;
   cloud.material.clippingPlanes = [];
   cloud.material.needsUpdate = true;
+
+  // També retallem la MALLA texturada (si n'hi ha), quedant-nos només els
+  // triangles totalment dins de la caixa. Preserva UVs i material.
+  if (cloud.userData?.meshView) {
+    const toRemove = [];
+    cloud.userData.meshView.traverse(o => {
+      if (o.isMesh && o.geometry) {
+        _cropMeshWithPlanes(o, planes);
+        const p = o.geometry.getAttribute('position');
+        if (!p || p.count === 0) toRemove.push(o);
+        if (o.material) { o.material.clippingPlanes = []; o.material.needsUpdate = true; }
+      }
+    });
+    for (const o of toRemove) { o.parent?.remove(o); o.geometry?.dispose?.(); }
+  }
 
   // Eliminem la caixa
   removeClipBox();
@@ -4389,6 +4494,8 @@ function setupUI() {
   }
 
   fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
+  // Exposa handleFiles perquè scripts externs (drive.js) puguin passar-hi fitxers descarregats
+  try { window.handleFiles = handleFiles; } catch (_) {}
   const dirInput = document.getElementById('dirInput');
   if (dirInput) dirInput.addEventListener('change', (e) => handleFiles(e.target.files));
 
@@ -5399,7 +5506,10 @@ function mergeCloudsInScene() {
   mergedMeshGroup.visible = false;
   const mergedGlbList = [];
   for (const c of list) {
-    if (c.userData?.glbBytes) mergedGlbList.push(c.userData.glbBytes);
+    if (c.userData?.glbBytes) {
+      c.updateWorldMatrix(true, false);
+      mergedGlbList.push({ bytes: c.userData.glbBytes, matrix: c.matrixWorld.clone() });
+    }
     const mv = c.userData?.meshView;
     if (!mv) continue;
     mv.updateWorldMatrix(true, true);
@@ -5535,6 +5645,9 @@ function _serializeCloud(cloud) {
     pos: pos ? pos.array.slice(0) : null,
     col: col ? col.array.slice(0) : null,
     glb: cloud.userData?.glbBytes || null,   // per poder reconstruir la vista de malla
+    glbList: cloud.userData?.glbBytesList
+      ? cloud.userData.glbBytesList.map(e => ({ bytes: e.bytes, matrix: Array.from(e.matrix.elements) }))
+      : null,   // per reconstruir la malla d'un núvol unit
   };
 }
 function _deserializeCloud(d) {
@@ -5556,6 +5669,14 @@ function _deserializeCloud(d) {
     cloud.matrix.decompose(cloud.position, cloud.quaternion, cloud.scale);
   }
   if (d.glb) cloud.userData.glbBytes = d.glb instanceof Uint8Array ? d.glb : new Uint8Array(d.glb);
+  if (d.glbList && Array.isArray(d.glbList) && d.glbList.length) {
+    cloud.userData.glbBytesList = d.glbList.map(e => {
+      const bytes = e.bytes instanceof Uint8Array ? e.bytes : new Uint8Array(e.bytes || []);
+      const mat = new THREE.Matrix4();
+      if (Array.isArray(e.matrix) && e.matrix.length === 16) mat.fromArray(e.matrix);
+      return { bytes, matrix: mat };
+    });
+  }
   return cloud;
 }
 
@@ -5593,7 +5714,8 @@ async function restoreSession() {
       for (const cd of data.clouds) {
         const cloud = _deserializeCloud(cd);
         scene.add(cloud); clouds.push(cloud); selectableObjects.push(cloud);
-        if (cloud.userData?.glbBytes) attachMeshFromGlb(cloud);
+        if (cloud.userData?.glbBytesList) attachMergedMeshFromGlbs(cloud);
+        else if (cloud.userData?.glbBytes) attachMeshFromGlb(cloud);
       }
       const last = clouds[clouds.length - 1];
       selectCloud(last);
@@ -5635,14 +5757,30 @@ function _b64ToU8(b64) {
   for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i);
   return bytes;
 }
-function saveProject() {
-  if (clouds.length === 0 && !(_ed2d && _ed2d.count().walls)) { alert('No hi ha res per desar encara. Carrega un núvol o dibuixa una planta.'); return; }
+function _buildProjectData() {
   const s = _collectSession();
-  const data = {
+  return {
     format: '4mc-project', version: 1, t: s.t,
-    clouds: s.clouds.map(c => ({ name: c.name, visible: c.visible, matrix: c.matrix, size: c.size, pos: _f32ToB64(c.pos), col: c.col ? _f32ToB64(c.col) : null, glb: c.glb ? _u8ToB64(c.glb) : null })),
+    clouds: s.clouds.map(c => ({
+      name: c.name, visible: c.visible, matrix: c.matrix, size: c.size,
+      pos: _f32ToB64(c.pos), col: c.col ? _f32ToB64(c.col) : null,
+      glb: c.glb ? _u8ToB64(c.glb) : null,
+      glbList: c.glbList ? c.glbList.map(e => ({ bytes: _u8ToB64(e.bytes), matrix: e.matrix })) : null,
+    })),
     drawing: s.drawing,
   };
+}
+// Retorna el projecte serialitzat com a Blob + nom suggerit — útil per pujar-lo a Drive.
+window.buildProjectBlob = function () {
+  if (clouds.length === 0 && !(_ed2d && _ed2d.count().walls)) { alert('No hi ha res per desar encara. Carrega un núvol o dibuixa una planta.'); return null; }
+  const data = _buildProjectData();
+  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+  const name = 'projecte_' + new Date().toISOString().slice(0, 10) + '.4mc';
+  return { blob, name };
+};
+function saveProject() {
+  if (clouds.length === 0 && !(_ed2d && _ed2d.count().walls)) { alert('No hi ha res per desar encara. Carrega un núvol o dibuixa una planta.'); return; }
+  const data = _buildProjectData();
   const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -5656,9 +5794,15 @@ async function loadProject(file) {
   const data = JSON.parse(await file.text());
   if (!data || data.format !== '4mc-project') throw new Error('No és un projecte .4mc vàlid');
   for (const cd of (data.clouds || [])) {
-    const cloud = _deserializeCloud({ name: cd.name, visible: cd.visible, matrix: cd.matrix, size: cd.size, pos: _b64ToF32(cd.pos), col: cd.col ? _b64ToF32(cd.col) : null, glb: cd.glb ? _b64ToU8(cd.glb) : null });
+    const cloud = _deserializeCloud({
+      name: cd.name, visible: cd.visible, matrix: cd.matrix, size: cd.size,
+      pos: _b64ToF32(cd.pos), col: cd.col ? _b64ToF32(cd.col) : null,
+      glb: cd.glb ? _b64ToU8(cd.glb) : null,
+      glbList: cd.glbList ? cd.glbList.map(e => ({ bytes: _b64ToU8(e.bytes), matrix: e.matrix })) : null,
+    });
     scene.add(cloud); clouds.push(cloud); selectableObjects.push(cloud);
-    if (cloud.userData?.glbBytes) attachMeshFromGlb(cloud);
+    if (cloud.userData?.glbBytesList) attachMergedMeshFromGlbs(cloud);
+    else if (cloud.userData?.glbBytes) attachMeshFromGlb(cloud);
   }
   if (data.drawing) {
     try { localStorage.setItem('mc_editor_state', JSON.stringify(data.drawing)); if (_ed2d) _ed2d.setState(data.drawing); } catch (_) {}

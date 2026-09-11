@@ -1,10 +1,11 @@
 // Service Worker — Merge Cloud PWA
 // redeploy: re-trigger GitHub Pages (deploy encallat)
-const CACHE = 'mergecloud-preview-v3';
+const CACHE = 'mergecloud-preview-v4';
 
 const ASSETS = [
   './index.html',
   './main.js',
+  './drive.js',
   './editor2d.js',
   './manifest.json',
   './three/three.module.js',
